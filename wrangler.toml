@@ -12,7 +12,7 @@ crons = ["*/5 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "site-watch-bot-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "e5a07d7e-3cdb-43d1-96ca-490333733734"
 
 # Secrets (set via `wrangler secret put`, never committed):
 #   BOT_TOKEN        - Telegram bot token from @BotFather
