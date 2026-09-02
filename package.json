@@ -1,0 +1,21 @@
+{
+  "name": "site-watch-bot",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "db:create": "wrangler d1 create site-watch-bot-db",
+    "db:migrate:local": "wrangler d1 migrations apply site-watch-bot-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply site-watch-bot-db --remote",
+    "secrets:bot-token": "wrangler secret put BOT_TOKEN",
+    "secrets:webhook-secret": "wrangler secret put WEBHOOK_SECRET",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260831.1",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.128.0"
+  }
+}

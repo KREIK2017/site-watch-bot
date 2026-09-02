@@ -1,0 +1,104 @@
+# Site Watch Bot
+
+Telegram-бот на Cloudflare Workers, який слідкує за сайтами: ціна, наявність товару,
+HTTP-статус, SSL/доступність і загальні зміни вмісту сторінки. Раз на 5 хвилин (cron)
+перевіряє всі активні watch-и і шле алерт у Telegram, якщо щось змінилось.
+
+## Команди бота
+
+- `/watch <url>` — почати стежити за сайтом
+- `/list` — список сайтів, за якими стежу
+- `/check <id>` — перевірити прямо зараз
+- `/unwatch <id>` — прибрати зі списку
+- `/help` — довідка
+
+## Стек
+
+- Cloudflare Workers (TypeScript) — `src/`
+- D1 (SQLite) — таблиця `watches`, міграція в `migrations/0001_init.sql`
+- Cron Trigger (`*/5 * * * *` в `wrangler.toml`) — фонові перевірки
+- Telegram Bot API через webhook (`/telegram-webhook`), перевірка секрету через
+  заголовок `X-Telegram-Bot-Api-Secret-Token`
+
+## Деплой з нуля
+
+1. **Встанови залежності**
+
+   ```
+   npm install
+   ```
+
+2. **Залогінься у Cloudflare** (якщо ще не логінився)
+
+   ```
+   npx wrangler login
+   ```
+
+3. **Створи D1 базу**
+
+   ```
+   npm run db:create
+   ```
+
+   Скопіюй `database_id` з виводу в `wrangler.toml` (поле `database_id`).
+
+4. **Прожени міграцію**
+
+   ```
+   npm run db:migrate:remote
+   ```
+
+5. **Створи бота через @BotFather** в Telegram (`/newbot`), збережи токен.
+
+6. **Задай секрети воркера**
+
+   ```
+   npm run secrets:bot-token
+   npm run secrets:webhook-secret
+   ```
+
+   `WEBHOOK_SECRET` — будь-який випадковий рядок, придумай сам (наприклад згенерований UUID).
+
+7. **Задеплой**
+
+   ```
+   npm run deploy
+   ```
+
+   Wrangler виведе URL воркера, напр. `https://site-watch-bot.<account>.workers.dev`.
+
+8. **Прив'яжи Telegram webhook до воркера** (підстав свій токен, URL воркера і той самий
+   `WEBHOOK_SECRET`, що й у кроці 6):
+
+   ```
+   curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
+     -d "url=https://site-watch-bot.<account>.workers.dev/telegram-webhook" \
+     -d "secret_token=<WEBHOOK_SECRET>"
+   ```
+
+9. Напиши боту `/start` у Telegram — має відповісти довідкою.
+
+## Локальна розробка
+
+```
+cp .dev.vars.example .dev.vars   # і встав туди свій токен/секрет
+npm run db:migrate:local
+npm run dev
+```
+
+`wrangler dev` підніме локальний сервер; для тесту вебхука зручно проксіювати його
+назовні (напр. через `cloudflared tunnel` чи `ngrok`) і тимчасово вказати цей URL у
+`setWebhook`.
+
+## Відомі обмеження MVP
+
+- Ціна/наявність визначаються евристично (regex + ключові слова), можуть хибити на
+  нетипових сайтах.
+- "Page content changed" — це хеш усього видимого тексту сторінки, тож динамічні
+  сайти (дата/час, лічильники, реклама) можуть давати фальшиві спрацювання.
+- SSL перевіряється побічно: якщо fetch падає з TLS-помилкою — це і є алерт
+  "unreachable". Термін дії сертифіката окремо не перевіряється.
+- Немає скріншотів (за рішенням — залишили на потім; потребує Cloudflare Browser
+  Rendering, платний план).
+- Інтервал перевірки один на всіх (cron у `wrangler.toml`), без персонального
+  інтервалу для кожного watch.

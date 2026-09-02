@@ -1,0 +1,19 @@
+name = "site-watch-bot"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Runs the checker for every active watch. Adjust frequency as needed
+# (Cloudflare cron minimum granularity is 1 minute).
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Created via `npm run db:create`, then paste the returned database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "site-watch-bot-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Secrets (set via `wrangler secret put`, never committed):
+#   BOT_TOKEN        - Telegram bot token from @BotFather
+#   WEBHOOK_SECRET   - random string, must match the secret_token used in setWebhook
