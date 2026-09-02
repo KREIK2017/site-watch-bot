@@ -44,7 +44,12 @@ export function htmlToText(html: string): string {
 
 export function extractPrice(text: string): string | null {
   const match = text.match(PRICE_RE);
-  return match ? match[0].replace(/\s+/g, " ").trim() : null;
+  if (match) return match[0].replace(/\s+/g, " ").trim();
+  // A selector (especially one targeting a data-* attribute) can return a bare
+  // number with no currency sign at all, e.g. data-price="501.50" — still a price.
+  const trimmed = text.trim();
+  if (/^\d[\d\s.,]{0,12}\d$|^\d$/.test(trimmed)) return trimmed;
+  return null;
 }
 
 export function extractStock(text: string): string | null {
@@ -73,16 +78,36 @@ export function humanizeStatus(status: number | null): string {
   return `Статус ${status}`;
 }
 
+// "<css-selector> @attr-name" reads one attribute instead of the element's text.
+// Needed for sites that fill in the real price via JS and only ship the raw
+// number as a data-* attribute (e.g. data-special-price="501.50") in the HTML
+// the bot actually receives.
+function parseSelectorSpec(spec: string): { selector: string; attr: string | null } {
+  const match = spec.match(/^(.*)\s@([a-zA-Z_:][-a-zA-Z0-9_:.]*)$/);
+  if (match) return { selector: match[1].trim(), attr: match[2] };
+  return { selector: spec.trim(), attr: null };
+}
+
 // Scopes extraction to one element via Cloudflare's native streaming HTML
 // parser, so /watch on a product page tracks that product instead of
 // whichever price/availability text happens to appear first on the page.
-async function extractBySelector(response: Response, selector: string): Promise<string> {
+async function extractBySelector(response: Response, spec: string): Promise<string> {
+  const { selector, attr } = parseSelectorSpec(spec);
   let captured = "";
-  const rewriter = new HTMLRewriter().on(selector, {
-    text(chunk) {
-      captured += chunk.text;
-    },
-  });
+  const rewriter = new HTMLRewriter().on(
+    selector,
+    attr
+      ? {
+          element(el) {
+            if (!captured) captured = el.getAttribute(attr) ?? "";
+          },
+        }
+      : {
+          text(chunk) {
+            captured += chunk.text;
+          },
+        }
+  );
   await rewriter.transform(response).text();
   return captured.replace(/\s+/g, " ").trim();
 }

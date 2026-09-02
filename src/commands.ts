@@ -15,7 +15,10 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 
 <b>Приклад для товару:</b>
 <code>/watch https://shop.com/product .price</code>
-Як знайти селектор: відкрий сторінку в браузері → правий клік на ціні/кнопці "Купити" → "Inspect" (Переглянути код) → правий клік на підсвіченому рядку в панелі розробника → Copy → Copy selector.`;
+Як знайти селектор: відкрий сторінку в браузері → правий клік на ціні/кнопці "Купити" → "Inspect" (Переглянути код) → правий клік на підсвіченому рядку в панелі розробника → Copy → Copy selector.
+
+Якщо ціна на сайті малюється через JavaScript (у сирому HTML її просто немає), можна витягти число напряму з атрибута елемента:
+<code>/watch https://shop.com/product .price @data-price</code>`;
 
 function normalizeUrl(input: string): string | null {
   const trimmed = input.trim();
