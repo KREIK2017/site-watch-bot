@@ -1,4 +1,4 @@
-import { analyzeUrl } from "./checker";
+import { analyzeUrl, humanizeStatus } from "./checker";
 import { escapeHtml, sendMessage } from "./telegram";
 import type { Env, TelegramMessage, WatchRow } from "./types";
 
@@ -6,11 +6,16 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу сторінки чи вмісту.
 
 <b>Команди:</b>
-/watch &lt;url&gt; — почати стежити за сайтом
+/watch &lt;url&gt; — стежити за всією сторінкою
+/watch &lt;url&gt; &lt;css-селектор&gt; — стежити тільки за одним товаром/блоком
 /list — список сайтів, за якими стежу
 /check &lt;id&gt; — перевірити зараз
 /unwatch &lt;id&gt; — прибрати зі списку
-/help — ця довідка`;
+/help — ця довідка
+
+<b>Приклад для товару:</b>
+<code>/watch https://shop.com/product .price</code>
+Як знайти селектор: відкрий сторінку в браузері → правий клік на ціні/кнопці "Купити" → "Inspect" (Переглянути код) → правий клік на підсвіченому рядку в панелі розробника → Copy → Copy selector.`;
 
 function normalizeUrl(input: string): string | null {
   const trimmed = input.trim();
@@ -23,36 +28,58 @@ function normalizeUrl(input: string): string | null {
   }
 }
 
+function parseWatchArgs(arg: string): { url: string; selector: string | null } | null {
+  const trimmed = arg.trim();
+  if (!trimmed) return null;
+
+  const firstSpace = trimmed.search(/\s/);
+  const urlPart = firstSpace === -1 ? trimmed : trimmed.slice(0, firstSpace);
+  const url = normalizeUrl(urlPart);
+  if (!url) return null;
+
+  let selector: string | null = firstSpace === -1 ? null : trimmed.slice(firstSpace + 1).trim();
+  if (selector) {
+    selector = selector.replace(/^["']|["']$/g, "").trim() || null;
+  }
+  return { url, selector };
+}
+
 async function handleWatch(env: Env, chatId: number, arg: string): Promise<void> {
-  const url = normalizeUrl(arg);
-  if (!url) {
-    await sendMessage(env.BOT_TOKEN, chatId, "Вкажи посилання: <code>/watch https://example.com</code>");
+  const parsed = parseWatchArgs(arg);
+  if (!parsed) {
+    await sendMessage(
+      env.BOT_TOKEN,
+      chatId,
+      "Вкажи посилання: <code>/watch https://example.com</code>\nЩоб стежити за конкретним товаром, додай CSS-селектор: <code>/watch https://example.com/product .price</code>"
+    );
     return;
   }
+  const { url, selector } = parsed;
 
   const existing = await env.DB.prepare(
-    "SELECT id FROM watches WHERE chat_id = ? AND url = ? AND active = 1"
+    "SELECT id FROM watches WHERE chat_id = ? AND url = ? AND active = 1 AND COALESCE(selector, '') = COALESCE(?, '')"
   )
-    .bind(chatId, url)
+    .bind(chatId, url, selector)
     .first<{ id: number }>();
   if (existing) {
     await sendMessage(env.BOT_TOKEN, chatId, `Вже стежу за цим сайтом (id ${existing.id}).`);
     return;
   }
 
-  const baseline = await analyzeUrl(url);
+  const baseline = await analyzeUrl(url, selector);
   const inserted = await env.DB.prepare(
-    `INSERT INTO watches (chat_id, url, last_status, last_hash, last_price, last_stock, last_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
+    `INSERT INTO watches (chat_id, url, selector, last_status, last_hash, last_price, last_stock, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
   )
-    .bind(chatId, url, baseline.status, baseline.textHash, baseline.price, baseline.stock)
+    .bind(chatId, url, selector, baseline.status, baseline.textHash, baseline.price, baseline.stock)
     .first<{ id: number }>();
 
   const lines = [`✅ Стежу за <b>${escapeHtml(url)}</b> (id ${inserted?.id})`];
+  if (selector) lines.push(`Елемент: <code>${escapeHtml(selector)}</code>`);
   if (baseline.error) {
-    lines.push(`⚠️ Перша перевірка не вдалась: ${escapeHtml(baseline.error)}`);
+    lines.push(`⚠️ ${escapeHtml(baseline.error)}`);
   } else {
-    lines.push(`Статус: ${baseline.status}`);
+    lines.push(`Статус: ${humanizeStatus(baseline.status)}`);
     if (baseline.price) lines.push(`Ціна: ${escapeHtml(baseline.price)}`);
     if (baseline.stock) lines.push(`Наявність: ${escapeHtml(baseline.stock)}`);
   }
@@ -61,10 +88,10 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
 
 async function handleList(env: Env, chatId: number): Promise<void> {
   const { results } = await env.DB.prepare(
-    "SELECT id, url, last_status, last_price, last_stock FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
+    "SELECT id, url, selector, last_status, last_price, last_stock FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
   )
     .bind(chatId)
-    .all<Pick<WatchRow, "id" | "url" | "last_status" | "last_price" | "last_stock">>();
+    .all<Pick<WatchRow, "id" | "url" | "selector" | "last_status" | "last_price" | "last_stock">>();
 
   if (!results.length) {
     await sendMessage(env.BOT_TOKEN, chatId, "Список порожній. Додай сайт: <code>/watch https://example.com</code>");
@@ -72,10 +99,10 @@ async function handleList(env: Env, chatId: number): Promise<void> {
   }
 
   const lines = results.map((w) => {
-    const parts = [`#${w.id} ${escapeHtml(w.url)}`];
-    if (w.last_status) parts.push(`status ${w.last_status}`);
+    const parts = [`#${w.id} ${escapeHtml(w.url)}`, humanizeStatus(w.last_status)];
     if (w.last_price) parts.push(`ціна ${escapeHtml(w.last_price)}`);
     if (w.last_stock) parts.push(escapeHtml(w.last_stock));
+    if (w.selector) parts.push(`[${escapeHtml(w.selector)}]`);
     return parts.join(" — ");
   });
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"));
@@ -114,7 +141,7 @@ async function handleCheck(env: Env, chatId: number, arg: string): Promise<void>
     return;
   }
 
-  const result = await analyzeUrl(watch.url);
+  const result = await analyzeUrl(watch.url, watch.selector);
   await env.DB.prepare(
     `UPDATE watches SET last_status = ?, last_hash = ?, last_price = ?, last_stock = ?, last_checked_at = datetime('now')
      WHERE id = ?`
@@ -122,11 +149,14 @@ async function handleCheck(env: Env, chatId: number, arg: string): Promise<void>
     .bind(result.status, result.textHash, result.price, result.stock, id)
     .run();
 
+  const lines = [`<b>${escapeHtml(watch.url)}</b>`];
+  if (watch.selector) lines.push(`Елемент: <code>${escapeHtml(watch.selector)}</code>`);
   if (result.error) {
-    await sendMessage(env.BOT_TOKEN, chatId, `⚠️ Помилка перевірки: ${escapeHtml(result.error)}`);
+    lines.push(`⚠️ ${escapeHtml(result.error)}`);
+    await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"));
     return;
   }
-  const lines = [`<b>${escapeHtml(watch.url)}</b>`, `Статус: ${result.status}`];
+  lines.push(`Статус: ${humanizeStatus(result.status)}`);
   if (result.price) lines.push(`Ціна: ${escapeHtml(result.price)}`);
   if (result.stock) lines.push(`Наявність: ${escapeHtml(result.stock)}`);
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"));

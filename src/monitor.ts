@@ -1,4 +1,4 @@
-import { analyzeUrl } from "./checker";
+import { analyzeUrl, humanizeStatus } from "./checker";
 import { escapeHtml, sendMessage } from "./telegram";
 import type { AnalyzeResult, Env, WatchRow } from "./types";
 
@@ -8,13 +8,13 @@ function buildChanges(prev: WatchRow, next: AnalyzeResult): string[] {
   const changes: string[] = [];
 
   if (prev.last_status !== null && next.status !== null && prev.last_status !== next.status) {
-    changes.push(`• Status: ${prev.last_status} → ${next.status}`);
+    changes.push(`• Статус: ${humanizeStatus(prev.last_status)} → ${humanizeStatus(next.status)}`);
   }
   if (prev.last_price && next.price && prev.last_price !== next.price) {
-    changes.push(`• Price: ${escapeHtml(prev.last_price)} → ${escapeHtml(next.price)}`);
+    changes.push(`• Ціна: ${escapeHtml(prev.last_price)} → ${escapeHtml(next.price)}`);
   }
   if (prev.last_stock && next.stock && prev.last_stock !== next.stock) {
-    changes.push(`• Stock: ${escapeHtml(prev.last_stock)} → ${escapeHtml(next.stock)}`);
+    changes.push(`• Наявність: ${escapeHtml(prev.last_stock)} → ${escapeHtml(next.stock)}`);
   }
   // Only flag a generic content change when nothing more specific changed,
   // otherwise every price/stock update would also print a redundant line.
@@ -24,14 +24,14 @@ function buildChanges(prev: WatchRow, next: AnalyzeResult): string[] {
     next.textHash &&
     prev.last_hash !== next.textHash
   ) {
-    changes.push("• Page content changed");
+    changes.push("• Вміст сторінки змінився");
   }
 
   return changes;
 }
 
 async function checkOne(env: Env, watch: WatchRow): Promise<void> {
-  const result = await analyzeUrl(watch.url);
+  const result = await analyzeUrl(watch.url, watch.selector);
 
   if (result.error) {
     // Only alert on the transition into an error state, not on every failed retry.
@@ -39,7 +39,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       await sendMessage(
         env.BOT_TOKEN,
         watch.chat_id,
-        `🚨 <b>${escapeHtml(watch.url)}</b> is unreachable\n${escapeHtml(result.error)}`
+        `🚨 <b>${escapeHtml(watch.url)}</b>\nПроблема при перевірці: ${escapeHtml(result.error)}`
       );
     }
     await env.DB.prepare(
@@ -54,7 +54,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   // A brand-new watch (no baseline yet) just gets its baseline stored, no alert.
   if (changes.length > 0 && watch.last_hash !== null) {
     const host = new URL(watch.url).hostname;
-    const text = [`🚨 <b>WEBSITE CHANGED</b>`, host, "", "Changed:", ...changes].join("\n");
+    const text = [`🚨 <b>САЙТ ЗМІНИВСЯ</b>`, host, "", "Зміни:", ...changes].join("\n");
     await sendMessage(env.BOT_TOKEN, watch.chat_id, text);
   }
 

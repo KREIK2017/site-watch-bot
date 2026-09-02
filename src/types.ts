@@ -24,6 +24,7 @@ export interface WatchRow {
   chat_id: number;
   url: string;
   label: string | null;
+  selector: string | null;
   last_status: number | null;
   last_hash: string | null;
   last_price: string | null;
