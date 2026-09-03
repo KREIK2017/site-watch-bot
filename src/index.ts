@@ -1,4 +1,4 @@
-import { handleMessage } from "./commands";
+import { handleCallbackQuery, handleMessage } from "./commands";
 import { runAllChecks } from "./monitor";
 import type { Env, TelegramUpdate } from "./types";
 
@@ -19,6 +19,8 @@ export default {
       const update = (await request.json()) as TelegramUpdate;
       if (update.message) {
         ctx.waitUntil(handleMessage(env, update.message));
+      } else if (update.callback_query) {
+        ctx.waitUntil(handleCallbackQuery(env, update.callback_query));
       }
       return new Response("OK", { status: 200 });
     }

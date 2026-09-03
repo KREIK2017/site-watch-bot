@@ -14,9 +14,21 @@ export interface TelegramMessage {
   text?: string;
 }
 
+export interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: TelegramMessage;
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+export interface InlineKeyboardButton {
+  text: string;
+  callback_data: string;
 }
 
 export interface WatchRow {
