@@ -26,9 +26,11 @@ export interface TelegramUpdate {
   callback_query?: TelegramCallbackQuery;
 }
 
+// Exactly one of callback_data/url per button (Telegram's own constraint).
 export interface InlineKeyboardButton {
   text: string;
-  callback_data: string;
+  callback_data?: string;
+  url?: string;
 }
 
 export interface WatchRow {

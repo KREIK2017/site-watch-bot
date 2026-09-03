@@ -49,15 +49,21 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 
 Можна просто вставити посилання в чат без команди — теж спрацює.`;
 
-// The "wrong price?" row only makes sense while the price came from an
-// untrusted guess (whole-page heuristic) — never for a pinned selector, a
-// Schema.org/Open Graph match, or Steam's official API, all of which mark
-// priceTrusted true.
-function watchButtonsRows(w: { id: number; price: string | null; priceTrusted: boolean }): InlineKeyboardButton[][] {
+// A separate url-type button (Telegram opens it directly, no round-trip to
+// the bot) on its own row — feedback from testing showed people expected
+// tapping something to open the product page, and instead hit "Прибрати"
+// (remove) by mistake since it was the only other button in reach.
+function watchButtonsRows(w: {
+  id: number;
+  url: string;
+  price: string | null;
+  priceTrusted: boolean;
+}): InlineKeyboardButton[][] {
   const rows: InlineKeyboardButton[][] = [
+    [{ text: "🔗 Відкрити сайт", url: w.url }],
     [
       { text: `🔄 Перевірити #${w.id}`, callback_data: `chk:${w.id}` },
-      { text: `🗑 Прибрати #${w.id}`, callback_data: `unw:${w.id}` },
+      { text: `🗑 Видалити #${w.id}`, callback_data: `unw:${w.id}` },
     ],
   ];
   if (w.price && !w.priceTrusted) {
@@ -152,7 +158,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     }
   }
   const keyboard = inserted
-    ? watchButtonsRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted })
+    ? watchButtonsRows({ id: inserted.id, url, price: baseline.price, priceTrusted: baseline.priceTrusted })
     : undefined;
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
@@ -192,7 +198,7 @@ async function buildListView(
   return {
     text: lines.join("\n"),
     keyboard: results.flatMap((w) =>
-      watchButtonsRows({ id: w.id, price: w.last_price, priceTrusted: Boolean(w.price_trusted) })
+      watchButtonsRows({ id: w.id, url: w.url, price: w.last_price, priceTrusted: Boolean(w.price_trusted) })
     ),
   };
 }
