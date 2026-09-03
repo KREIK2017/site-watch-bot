@@ -59,6 +59,68 @@ export function extractStock(text: string): string | null {
   return null;
 }
 
+const AVAILABILITY_MAP: Record<string, string> = {
+  instock: "В наявності",
+  limitedavailability: "Обмежена кількість",
+  outofstock: "Немає в наявності",
+  soldout: "Немає в наявності",
+  discontinued: "Знято з продажу",
+  preorder: "Передзамовлення",
+};
+
+function mapAvailability(raw: string): string | null {
+  const key = raw.split("/").pop()?.toLowerCase().replace(/[^a-z]/g, "");
+  return key ? AVAILABILITY_MAP[key] ?? null : null;
+}
+
+// Finds a Product/Offer node in a JSON-LD document, which may be a single
+// object, an array of objects, or wrapped in a top-level "@graph" array —
+// all three shapes are common across e-commerce platforms.
+function findOffer(node: unknown): { price?: unknown; availability?: unknown } | null {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findOffer(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  const obj = node as Record<string, unknown>;
+  const type = obj["@type"];
+  const types = Array.isArray(type) ? type : [type];
+  if (types.includes("Product") && obj.offers) {
+    const offer = Array.isArray(obj.offers) ? obj.offers[0] : obj.offers;
+    if (offer && typeof offer === "object") return offer as { price?: unknown; availability?: unknown };
+  }
+  if (obj["@graph"]) return findOffer(obj["@graph"]);
+  return null;
+}
+
+// Most modern storefronts (Shopify, WooCommerce, PrestaShop, Wix...) embed the
+// price/availability as static Schema.org JSON-LD or Open Graph meta tags —
+// meant for Google, but it means the real price often exists in the raw HTML
+// even on sites where the *visible* price is drawn in later by JavaScript.
+// Checking this first lets most /watch calls skip the CSS-selector step.
+function extractStructuredData(html: string): { price: string | null; stock: string | null } {
+  const scripts = html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+  for (const scriptMatch of scripts) {
+    try {
+      const offer = findOffer(JSON.parse(scriptMatch[1].trim()));
+      if (!offer) continue;
+      const price = offer.price !== undefined && offer.price !== null ? String(offer.price).trim() : null;
+      const stock = typeof offer.availability === "string" ? mapAvailability(offer.availability) : null;
+      if (price || stock) return { price, stock };
+    } catch {
+      // Malformed JSON-LD is common in the wild; just skip that block.
+    }
+  }
+
+  const metaPrice = html.match(
+    /<meta[^>]+(?:property|name)=["'](?:product:price:amount|price)["'][^>]+content=["']([^"']+)["']/i
+  );
+  return { price: metaPrice ? metaPrice[1].trim() : null, stock: null };
+}
+
 export async function sha256(text: string): Promise<string> {
   const data = new TextEncoder().encode(text);
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -120,9 +182,8 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
     });
     const status = res.status;
 
-    let text: string;
     if (selector) {
-      text = await extractBySelector(res, selector);
+      const text = await extractBySelector(res, selector);
       if (!text) {
         return {
           status,
@@ -133,17 +194,24 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
           error: `Селектор "${selector}" нічого не знайшов на сторінці`,
         };
       }
-    } else {
-      const html = await res.text();
-      text = htmlToText(html);
+      return {
+        status,
+        sslOk: true,
+        textHash: await sha256(text),
+        price: extractPrice(text),
+        stock: extractStock(text),
+      };
     }
 
+    const html = await res.text();
+    const text = htmlToText(html);
+    const structured = extractStructuredData(html);
     return {
       status,
       sslOk: true,
       textHash: await sha256(text),
-      price: extractPrice(text),
-      stock: extractStock(text),
+      price: structured.price ?? extractPrice(text),
+      stock: structured.stock ?? extractStock(text),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
