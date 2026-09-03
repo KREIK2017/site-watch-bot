@@ -378,6 +378,7 @@ async function analyzeSteam(env: Env, appId: string): Promise<AnalyzeResult | nu
       sslOk: true,
       title,
       textHash: await sha256(JSON.stringify({ price: data.price_overview, isFree: data.is_free })),
+      value: null,
       price,
       priceTrusted: true,
       stock,
@@ -400,6 +401,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       sslOk: true,
       title: null,
       textHash: null,
+      value: null,
       price: null,
       priceTrusted: false,
       stock: null,
@@ -428,6 +430,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
           sslOk: true,
           title,
           textHash: null,
+          value: null,
           price: null,
           priceTrusted: false,
           stock: null,
@@ -439,6 +442,11 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
         sslOk: true,
         title,
         textHash: await sha256(text),
+        // The raw scoped text, kept alongside price/stock so non-commerce
+        // watches (a manga chapter list, a forum reply count, a score) can
+        // still show and diff a meaningful "was X, now Y" instead of just
+        // "content changed" when it isn't shaped like a price at all.
+        value: text,
         price: extractPrice(text),
         priceTrusted: true,
         stock: extractStock(text),
@@ -454,6 +462,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       sslOk: true,
       title: title ? truncate(title, 120) : null,
       textHash: await sha256(text),
+      value: null,
       price: ok ? structured.price ?? extractPrice(text) : null,
       priceTrusted: Boolean(structured.price),
       stock: ok ? structured.stock ?? extractStock(text) : null,
@@ -461,6 +470,16 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const sslOk = !/ssl|certificate|tls/i.test(message);
-    return { status: null, sslOk, title: null, textHash: null, price: null, priceTrusted: false, stock: null, error: message };
+    return {
+      status: null,
+      sslOk,
+      title: null,
+      textHash: null,
+      value: null,
+      price: null,
+      priceTrusted: false,
+      stock: null,
+      error: message,
+    };
   }
 }

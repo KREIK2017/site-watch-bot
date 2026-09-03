@@ -117,8 +117,8 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
 
   const baseline = await analyzeUrl(env, url, selector);
   const inserted = await env.DB.prepare(
-    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
+    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_value, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
   )
     .bind(
       chatId,
@@ -129,7 +129,8 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
       baseline.textHash,
       baseline.price,
       baseline.priceTrusted ? 1 : 0,
-      baseline.stock
+      baseline.stock,
+      baseline.value
     )
     .first<{ id: number }>();
 
@@ -146,6 +147,9 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
       lines.push(`Ціна: ${escapeHtml(priceDisplay ?? baseline.price)}`);
     }
     if (baseline.stock) lines.push(`Наявність: ${escapeHtml(baseline.stock)}`);
+    if (!baseline.price && !baseline.stock && baseline.value) {
+      lines.push(`Значення: ${escapeHtml(baseline.value)}`);
+    }
   }
   const keyboard = inserted
     ? watchButtonsRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted })
@@ -155,7 +159,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
 
 type ListRow = Pick<
   WatchRow,
-  "id" | "url" | "label" | "selector" | "last_status" | "last_price" | "price_trusted" | "last_stock"
+  "id" | "url" | "label" | "selector" | "last_status" | "last_price" | "price_trusted" | "last_stock" | "last_value"
 >;
 
 async function buildListView(
@@ -163,7 +167,7 @@ async function buildListView(
   chatId: number
 ): Promise<{ text: string; keyboard: InlineKeyboardButton[][] }> {
   const { results } = await env.DB.prepare(
-    "SELECT id, url, label, selector, last_status, last_price, price_trusted, last_stock FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
+    "SELECT id, url, label, selector, last_status, last_price, price_trusted, last_stock, last_value FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
   )
     .bind(chatId)
     .all<ListRow>();
@@ -179,6 +183,7 @@ async function buildListView(
       const priceDisplay = await convertPrice(env, w.last_price, currency);
       if (priceDisplay) parts.push(`ціна ${escapeHtml(priceDisplay)}`);
       if (w.last_stock) parts.push(escapeHtml(w.last_stock));
+      if (!w.last_price && !w.last_stock && w.last_value) parts.push(escapeHtml(w.last_value));
       if (w.selector) parts.push("🎯");
       return parts.join(" — ");
     })
@@ -224,7 +229,7 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
 
   const result = await analyzeUrl(env, watch.url, watch.selector);
   await env.DB.prepare(
-    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_value = ?, last_checked_at = datetime('now')
      WHERE id = ?`
   )
     .bind(
@@ -234,6 +239,7 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
       result.price,
       result.priceTrusted ? 1 : 0,
       result.stock,
+      result.value,
       id
     )
     .run();
@@ -251,6 +257,9 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
       lines.push(`Ціна: ${escapeHtml(priceDisplay ?? result.price)}`);
     }
     if (result.stock) lines.push(`Наявність: ${escapeHtml(result.stock)}`);
+    if (!result.price && !result.stock && result.value) {
+      lines.push(`Значення: ${escapeHtml(result.value)}`);
+    }
   }
   return { text: lines.join("\n"), watch };
 }

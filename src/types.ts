@@ -42,6 +42,7 @@ export interface WatchRow {
   last_price: string | null;
   price_trusted: number;
   last_stock: string | null;
+  last_value: string | null;
   created_at: string;
   last_checked_at: string | null;
   active: number;
@@ -52,6 +53,7 @@ export interface AnalyzeResult {
   sslOk: boolean;
   title: string | null;
   textHash: string | null;
+  value: string | null;
   price: string | null;
   priceTrusted: boolean;
   stock: string | null;

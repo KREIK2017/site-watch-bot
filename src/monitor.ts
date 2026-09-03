@@ -26,6 +26,19 @@ async function buildChanges(
   if (prev.last_stock && next.stock && prev.last_stock !== next.stock) {
     changes.push(`• Наявність: ${escapeHtml(prev.last_stock)} → ${escapeHtml(next.stock)}`);
   }
+  // For a selector watch with no price/stock shape (a manga chapter number, a
+  // forum reply count, a score...), show the actual old → new value instead
+  // of falling back to a vague "content changed".
+  if (
+    changes.length === 0 &&
+    !next.price &&
+    !next.stock &&
+    prev.last_value &&
+    next.value &&
+    prev.last_value !== next.value
+  ) {
+    changes.push(`• Значення: ${escapeHtml(prev.last_value)} → ${escapeHtml(next.value)}`);
+  }
   // Only flag a generic content change when nothing more specific changed,
   // otherwise every price/stock update would also print a redundant line.
   if (
@@ -75,7 +88,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   }
 
   await env.DB.prepare(
-    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_value = ?, last_checked_at = datetime('now')
      WHERE id = ?`
   )
     .bind(
@@ -85,6 +98,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       result.price,
       result.priceTrusted ? 1 : 0,
       result.stock,
+      result.value,
       watch.id
     )
     .run();
