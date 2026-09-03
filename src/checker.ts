@@ -366,7 +366,18 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
   if (steamMatch) {
     const steamResult = await analyzeSteam(steamMatch[1]);
     if (steamResult) return steamResult;
-    // Fall through to the generic path below if Steam's API is unreachable.
+    // Steam's appdetails API occasionally rate-limits/blocks. Report it as a
+    // transient error instead of falling through to scraping the store page's
+    // HTML, which would misreport a real product as "changed" or "403".
+    return {
+      status: null,
+      sslOk: true,
+      title: null,
+      textHash: null,
+      price: null,
+      stock: null,
+      error: "Steam API тимчасово недоступний, спробую при наступній перевірці",
+    };
   }
 
   try {

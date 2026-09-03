@@ -1,17 +1,27 @@
 import { analyzeUrl, humanizeStatus } from "./checker";
+import { convertPrice, getChatCurrency } from "./currency";
 import { escapeHtml, sendMessage, watchLink } from "./telegram";
 import type { AnalyzeResult, Env, WatchRow } from "./types";
 
 const CONCURRENCY = 8;
 
-function buildChanges(prev: WatchRow, next: AnalyzeResult): string[] {
+async function buildChanges(
+  env: Env,
+  currency: string | null,
+  prev: WatchRow,
+  next: AnalyzeResult
+): Promise<string[]> {
   const changes: string[] = [];
 
   if (prev.last_status !== null && next.status !== null && prev.last_status !== next.status) {
     changes.push(`• Статус: ${humanizeStatus(prev.last_status)} → ${humanizeStatus(next.status)}`);
   }
   if (prev.last_price && next.price && prev.last_price !== next.price) {
-    changes.push(`• Ціна: ${escapeHtml(prev.last_price)} → ${escapeHtml(next.price)}`);
+    const [prevDisplay, nextDisplay] = await Promise.all([
+      convertPrice(env, prev.last_price, currency),
+      convertPrice(env, next.price, currency),
+    ]);
+    changes.push(`• Ціна: ${escapeHtml(prevDisplay ?? prev.last_price)} → ${escapeHtml(nextDisplay ?? next.price)}`);
   }
   if (prev.last_stock && next.stock && prev.last_stock !== next.stock) {
     changes.push(`• Наявність: ${escapeHtml(prev.last_stock)} → ${escapeHtml(next.stock)}`);
@@ -50,7 +60,8 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
     return;
   }
 
-  const changes = buildChanges(watch, result);
+  const currency = await getChatCurrency(env, watch.chat_id);
+  const changes = await buildChanges(env, currency, watch, result);
   // A brand-new watch (no baseline yet) just gets its baseline stored, no alert.
   if (changes.length > 0 && watch.last_hash !== null) {
     const text = [

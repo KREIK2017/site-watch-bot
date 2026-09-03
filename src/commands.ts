@@ -1,6 +1,23 @@
 import { analyzeUrl, BOT_USER_AGENT, findPriceCandidates, humanizeStatus } from "./checker";
+import { convertPrice, getChatCurrency, setChatCurrency } from "./currency";
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMainMenu, sendMessage, watchLink } from "./telegram";
 import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage, WatchRow } from "./types";
+
+const CURRENCY_OPTIONS: { code: string; label: string }[] = [
+  { code: "UAH", label: "🇺🇦 UAH" },
+  { code: "USD", label: "🇺🇸 USD" },
+  { code: "EUR", label: "🇪🇺 EUR" },
+  { code: "GBP", label: "🇬🇧 GBP" },
+  { code: "PLN", label: "🇵🇱 PLN" },
+];
+
+function currencyKeyboard(): InlineKeyboardButton[][] {
+  return [
+    [CURRENCY_OPTIONS[0], CURRENCY_OPTIONS[1]].map((c) => ({ text: c.label, callback_data: `curr:${c.code}` })),
+    [CURRENCY_OPTIONS[2], CURRENCY_OPTIONS[3]].map((c) => ({ text: c.label, callback_data: `curr:${c.code}` })),
+    [{ text: CURRENCY_OPTIONS[4].label, callback_data: `curr:${CURRENCY_OPTIONS[4].code}` }],
+  ];
+}
 
 // "auto:<rule>:<index>" is an internal addressing scheme from the candidate
 // picker, meaningless to a user — only show a selector back when they typed
@@ -16,24 +33,21 @@ const WELCOME_TEXT = `<b>Site Watch Bot</b>
 Користуйся кнопками знизу або команда <code>/help</code> для повної довідки.`;
 
 const HELP_TEXT = `<b>Site Watch Bot</b>
-Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу сторінки чи вмісту.
+Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу чи вмісту сторінки.
 
 <b>Команди:</b>
-/watch &lt;url&gt; — стежити за всією сторінкою
-/watch &lt;url&gt; &lt;css-селектор&gt; — стежити тільки за одним товаром/блоком
-/list — список сайтів, за якими стежу (з кнопками)
+/watch &lt;url&gt; — почати стежити
+/list — мої сайти
 /check &lt;id&gt; — перевірити зараз
 /unwatch &lt;id&gt; — прибрати зі списку
+/currency — обрати валюту показу цін
 /help — ця довідка
 
-<b>Приклад для товару:</b>
-<code>/watch https://shop.com/product .price</code>
-Як знайти селектор: відкрий сторінку в браузері → правий клік на ціні/кнопці "Купити" → "Inspect" (Переглянути код) → правий клік на підсвіченому рядку в панелі розробника → Copy → Copy selector.
+<b>Приклади:</b>
+<code>/watch https://example.com/product</code>
+<code>/watch https://store.steampowered.com/app/12345/GameName</code>
 
-Якщо ціна на сайті малюється через JavaScript (у сирому HTML її просто немає), можна витягти число напряму з атрибута елемента:
-<code>/watch https://shop.com/product .price @data-price</code>
-
-Посилання на Steam (store.steampowered.com/app/...) обробляються окремо через офіційний Steam API — ціна, знижка і назва гри завжди точні.`;
+Можна просто вставити посилання в чат без команди — теж спрацює.`;
 
 // The "wrong price?" row only makes sense while the price came from a guess
 // (no pinned selector yet) and there's actually a value to question.
@@ -114,7 +128,11 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     lines.push(`⚠️ ${escapeHtml(baseline.error)}`);
   } else {
     lines.push(`Статус: ${humanizeStatus(baseline.status)}`);
-    if (baseline.price) lines.push(`Ціна: ${escapeHtml(baseline.price)}`);
+    if (baseline.price) {
+      const currency = await getChatCurrency(env, chatId);
+      const priceDisplay = await convertPrice(env, baseline.price, currency);
+      lines.push(`Ціна: ${escapeHtml(priceDisplay ?? baseline.price)}`);
+    }
     if (baseline.stock) lines.push(`Наявність: ${escapeHtml(baseline.stock)}`);
   }
   const keyboard = inserted ? watchButtonsRows({ id: inserted.id, selector, price: baseline.price }) : undefined;
@@ -137,13 +155,17 @@ async function buildListView(
     return { text: "Список порожній. Додай сайт: <code>/watch https://example.com</code>", keyboard: [] };
   }
 
-  const lines = results.map((w) => {
-    const parts = [`#${w.id} ${watchLink(w.url, w.label)}`, humanizeStatus(w.last_status)];
-    if (w.last_price) parts.push(`ціна ${escapeHtml(w.last_price)}`);
-    if (w.last_stock) parts.push(escapeHtml(w.last_stock));
-    if (w.selector) parts.push("🎯");
-    return parts.join(" — ");
-  });
+  const currency = await getChatCurrency(env, chatId);
+  const lines = await Promise.all(
+    results.map(async (w) => {
+      const parts = [`#${w.id} ${watchLink(w.url, w.label)}`, humanizeStatus(w.last_status)];
+      const priceDisplay = await convertPrice(env, w.last_price, currency);
+      if (priceDisplay) parts.push(`ціна ${escapeHtml(priceDisplay)}`);
+      if (w.last_stock) parts.push(escapeHtml(w.last_stock));
+      if (w.selector) parts.push("🎯");
+      return parts.join(" — ");
+    })
+  );
 
   return {
     text: lines.join("\n"),
@@ -196,7 +218,11 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
     lines.push(`⚠️ ${escapeHtml(result.error)}`);
   } else {
     lines.push(`Статус: ${humanizeStatus(result.status)}`);
-    if (result.price) lines.push(`Ціна: ${escapeHtml(result.price)}`);
+    if (result.price) {
+      const currency = await getChatCurrency(env, chatId);
+      const priceDisplay = await convertPrice(env, result.price, currency);
+      lines.push(`Ціна: ${escapeHtml(priceDisplay ?? result.price)}`);
+    }
     if (result.stock) lines.push(`Наявність: ${escapeHtml(result.stock)}`);
   }
   return { text: lines.join("\n"), watch };
@@ -253,9 +279,14 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
   const arg = rest.join(" ");
 
   switch (command) {
-    case "/start":
+    case "/start": {
       await sendMainMenu(env.BOT_TOKEN, chatId, WELCOME_TEXT);
+      const currency = await getChatCurrency(env, chatId);
+      if (!currency) {
+        await sendMessage(env.BOT_TOKEN, chatId, "В якій валюті показувати ціни?", currencyKeyboard());
+      }
       break;
+    }
     case "/help":
       await sendMessage(env.BOT_TOKEN, chatId, HELP_TEXT);
       break;
@@ -270,6 +301,9 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
       break;
     case "/check":
       await handleCheck(env, chatId, arg);
+      break;
+    case "/currency":
+      await sendMessage(env.BOT_TOKEN, chatId, "В якій валюті показувати ціни?", currencyKeyboard());
       break;
     default:
       await sendMessage(env.BOT_TOKEN, chatId, "Не знаю такої команди. /help — список команд.");
@@ -339,9 +373,20 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
   const messageId = query.message?.message_id;
   const data = query.data ?? "";
   const [action, idRaw, ...rest] = data.split(":");
-  const id = Number(idRaw);
 
-  if (!chatId || !messageId || !Number.isInteger(id)) {
+  if (!chatId) {
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, "Кнопка застаріла");
+    return;
+  }
+
+  if (action === "curr") {
+    await setChatCurrency(env, chatId, idRaw);
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, `Валюта: ${idRaw} ✅`);
+    return;
+  }
+
+  const id = Number(idRaw);
+  if (!messageId || !Number.isInteger(id)) {
     await answerCallbackQuery(env.BOT_TOKEN, query.id, "Кнопка застаріла, онови список через /list");
     return;
   }
