@@ -49,16 +49,18 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 
 Можна просто вставити посилання в чат без команди — теж спрацює.`;
 
-// The "wrong price?" row only makes sense while the price came from a guess
-// (no pinned selector yet) and there's actually a value to question.
-function watchButtonsRows(w: { id: number; selector: string | null; price: string | null }): InlineKeyboardButton[][] {
+// The "wrong price?" row only makes sense while the price came from an
+// untrusted guess (whole-page heuristic) — never for a pinned selector, a
+// Schema.org/Open Graph match, or Steam's official API, all of which mark
+// priceTrusted true.
+function watchButtonsRows(w: { id: number; price: string | null; priceTrusted: boolean }): InlineKeyboardButton[][] {
   const rows: InlineKeyboardButton[][] = [
     [
       { text: `🔄 Перевірити #${w.id}`, callback_data: `chk:${w.id}` },
       { text: `🗑 Прибрати #${w.id}`, callback_data: `unw:${w.id}` },
     ],
   ];
-  if (!w.selector && w.price) {
+  if (w.price && !w.priceTrusted) {
     rows.push([{ text: `❔ Не та ціна? #${w.id}`, callback_data: `fix:${w.id}` }]);
   }
   return rows;
@@ -113,12 +115,22 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     return;
   }
 
-  const baseline = await analyzeUrl(url, selector);
+  const baseline = await analyzeUrl(env, url, selector);
   const inserted = await env.DB.prepare(
-    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, last_stock, last_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
+    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
   )
-    .bind(chatId, url, baseline.title, selector, baseline.status, baseline.textHash, baseline.price, baseline.stock)
+    .bind(
+      chatId,
+      url,
+      baseline.title,
+      selector,
+      baseline.status,
+      baseline.textHash,
+      baseline.price,
+      baseline.priceTrusted ? 1 : 0,
+      baseline.stock
+    )
     .first<{ id: number }>();
 
   const lines = [`✅ Стежу за <b>${watchLink(url, baseline.title)}</b> (id ${inserted?.id})`];
@@ -135,18 +147,23 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     }
     if (baseline.stock) lines.push(`Наявність: ${escapeHtml(baseline.stock)}`);
   }
-  const keyboard = inserted ? watchButtonsRows({ id: inserted.id, selector, price: baseline.price }) : undefined;
+  const keyboard = inserted
+    ? watchButtonsRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted })
+    : undefined;
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
 
-type ListRow = Pick<WatchRow, "id" | "url" | "label" | "selector" | "last_status" | "last_price" | "last_stock">;
+type ListRow = Pick<
+  WatchRow,
+  "id" | "url" | "label" | "selector" | "last_status" | "last_price" | "price_trusted" | "last_stock"
+>;
 
 async function buildListView(
   env: Env,
   chatId: number
 ): Promise<{ text: string; keyboard: InlineKeyboardButton[][] }> {
   const { results } = await env.DB.prepare(
-    "SELECT id, url, label, selector, last_status, last_price, last_stock FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
+    "SELECT id, url, label, selector, last_status, last_price, price_trusted, last_stock FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
   )
     .bind(chatId)
     .all<ListRow>();
@@ -169,7 +186,9 @@ async function buildListView(
 
   return {
     text: lines.join("\n"),
-    keyboard: results.flatMap((w) => watchButtonsRows({ id: w.id, selector: w.selector, price: w.last_price })),
+    keyboard: results.flatMap((w) =>
+      watchButtonsRows({ id: w.id, price: w.last_price, priceTrusted: Boolean(w.price_trusted) })
+    ),
   };
 }
 
@@ -203,12 +222,20 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
     .first<WatchRow>();
   if (!watch) return null;
 
-  const result = await analyzeUrl(watch.url, watch.selector);
+  const result = await analyzeUrl(env, watch.url, watch.selector);
   await env.DB.prepare(
-    `UPDATE watches SET label = COALESCE(label, ?), last_status = ?, last_hash = ?, last_price = ?, last_stock = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_checked_at = datetime('now')
      WHERE id = ?`
   )
-    .bind(result.title, result.status, result.textHash, result.price, result.stock, id)
+    .bind(
+      result.title,
+      result.status,
+      result.textHash,
+      result.price,
+      result.priceTrusted ? 1 : 0,
+      result.stock,
+      id
+    )
     .run();
 
   const lines = [`<b>${watchLink(watch.url, watch.label ?? result.title)}</b>`];

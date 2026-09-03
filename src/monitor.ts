@@ -41,7 +41,7 @@ async function buildChanges(
 }
 
 async function checkOne(env: Env, watch: WatchRow): Promise<void> {
-  const result = await analyzeUrl(watch.url, watch.selector);
+  const result = await analyzeUrl(env, watch.url, watch.selector);
 
   if (result.error) {
     // Only alert on the transition into an error state, not on every failed retry.
@@ -75,10 +75,18 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   }
 
   await env.DB.prepare(
-    `UPDATE watches SET label = COALESCE(label, ?), last_status = ?, last_hash = ?, last_price = ?, last_stock = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_checked_at = datetime('now')
      WHERE id = ?`
   )
-    .bind(result.title, result.status, result.textHash, result.price, result.stock, watch.id)
+    .bind(
+      result.title,
+      result.status,
+      result.textHash,
+      result.price,
+      result.priceTrusted ? 1 : 0,
+      result.stock,
+      watch.id
+    )
     .run();
 }
 

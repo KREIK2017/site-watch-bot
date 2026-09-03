@@ -1,4 +1,4 @@
-import type { AnalyzeResult } from "./types";
+import type { AnalyzeResult, Env } from "./types";
 
 const OUT_OF_STOCK_PATTERNS = [
   "out of stock",
@@ -318,21 +318,46 @@ interface SteamAppData {
   release_date?: { coming_soon?: boolean };
 }
 
-// Steam ships a free, unauthenticated JSON API with clean name/price data —
-// far more reliable than scraping the store page's HTML for a "special case"
-// this common (game price/discount tracking).
-async function analyzeSteam(appId: string): Promise<AnalyzeResult | null> {
+const STEAM_CACHE_MS = 4 * 60 * 1000; // just under the 5 min cron cadence
+
+// Steam's public appdetails API has an undocumented, fairly aggressive per-IP
+// rate limit that a handful of near-simultaneous checks can trip. Caching the
+// raw response in D1 means a manual "🔄 Перевірити" tap right after cron (or
+// several watches on the same game) reuse one fetch instead of hammering it.
+async function fetchSteamData(env: Env, appId: string): Promise<SteamAppData | null> {
+  const cached = await env.DB.prepare("SELECT data, fetched_at FROM steam_cache WHERE app_id = ?")
+    .bind(appId)
+    .first<{ data: string; fetched_at: string }>();
+  if (cached && Date.now() - new Date(`${cached.fetched_at}Z`).getTime() < STEAM_CACHE_MS) {
+    return JSON.parse(cached.data) as SteamAppData;
+  }
+
   try {
     const res = await fetch(
       `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=ua&l=ukrainian`,
       { headers: { "user-agent": BOT_USER_AGENT } }
     );
-    if (!res.ok) return null;
+    if (!res.ok) return cached ? (JSON.parse(cached.data) as SteamAppData) : null;
     const json = (await res.json()) as Record<string, { success: boolean; data?: SteamAppData }>;
     const entry = json[appId];
-    if (!entry?.success || !entry.data) return null;
+    if (!entry?.success || !entry.data) return cached ? (JSON.parse(cached.data) as SteamAppData) : null;
 
-    const data = entry.data;
+    await env.DB.prepare(
+      `INSERT INTO steam_cache (app_id, data, fetched_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(app_id) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at`
+    )
+      .bind(appId, JSON.stringify(entry.data))
+      .run();
+    return entry.data;
+  } catch {
+    return cached ? (JSON.parse(cached.data) as SteamAppData) : null;
+  }
+}
+
+async function analyzeSteam(env: Env, appId: string): Promise<AnalyzeResult | null> {
+  try {
+    const data = await fetchSteamData(env, appId);
+    if (!data) return null;
     const title = data.name ? truncate(data.name, 120) : null;
     let price: string | null = null;
     let stock: string | null = null;
@@ -354,6 +379,7 @@ async function analyzeSteam(appId: string): Promise<AnalyzeResult | null> {
       title,
       textHash: await sha256(JSON.stringify({ price: data.price_overview, isFree: data.is_free })),
       price,
+      priceTrusted: true,
       stock,
     };
   } catch {
@@ -361,10 +387,10 @@ async function analyzeSteam(appId: string): Promise<AnalyzeResult | null> {
   }
 }
 
-export async function analyzeUrl(url: string, selector?: string | null): Promise<AnalyzeResult> {
+export async function analyzeUrl(env: Env, url: string, selector?: string | null): Promise<AnalyzeResult> {
   const steamMatch = url.match(STEAM_APP_RE);
   if (steamMatch) {
-    const steamResult = await analyzeSteam(steamMatch[1]);
+    const steamResult = await analyzeSteam(env, steamMatch[1]);
     if (steamResult) return steamResult;
     // Steam's appdetails API occasionally rate-limits/blocks. Report it as a
     // transient error instead of falling through to scraping the store page's
@@ -375,6 +401,7 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
       title: null,
       textHash: null,
       price: null,
+      priceTrusted: false,
       stock: null,
       error: "Steam API тимчасово недоступний, спробую при наступній перевірці",
     };
@@ -386,9 +413,12 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
       headers: { "user-agent": BOT_USER_AGENT },
     });
     const status = res.status;
+    // A non-2xx response body is almost always an error/bot-challenge page
+    // ("Just a moment...", "Access denied"...), never the real page title.
+    const ok = status >= 200 && status < 300;
 
     if (selector) {
-      const title = extractTitle(await res.clone().text().catch(() => ""));
+      const title = ok ? extractTitle(await res.clone().text().catch(() => "")) : null;
       const text = selector.startsWith("auto:")
         ? await extractByAutoSpec(res, selector)
         : await extractBySelector(res, selector);
@@ -399,6 +429,7 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
           title,
           textHash: null,
           price: null,
+          priceTrusted: false,
           stock: null,
           error: `Селектор "${selector}" нічого не знайшов на сторінці`,
         };
@@ -409,25 +440,27 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
         title,
         textHash: await sha256(text),
         price: extractPrice(text),
+        priceTrusted: true,
         stock: extractStock(text),
       };
     }
 
     const html = await res.text();
     const text = htmlToText(html);
-    const structured = extractStructuredData(html);
-    const title = structured.title ?? extractTitleTag(html);
+    const structured = ok ? extractStructuredData(html) : { title: null, price: null, stock: null };
+    const title = ok ? structured.title ?? extractTitleTag(html) : null;
     return {
       status,
       sslOk: true,
       title: title ? truncate(title, 120) : null,
       textHash: await sha256(text),
-      price: structured.price ?? extractPrice(text),
-      stock: structured.stock ?? extractStock(text),
+      price: ok ? structured.price ?? extractPrice(text) : null,
+      priceTrusted: Boolean(structured.price),
+      stock: ok ? structured.stock ?? extractStock(text) : null,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const sslOk = !/ssl|certificate|tls/i.test(message);
-    return { status: null, sslOk, title: null, textHash: null, price: null, stock: null, error: message };
+    return { status: null, sslOk, title: null, textHash: null, price: null, priceTrusted: false, stock: null, error: message };
   }
 }
