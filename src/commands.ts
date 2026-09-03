@@ -49,18 +49,12 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 
 Можна просто вставити посилання в чат без команди — теж спрацює.`;
 
-// A separate url-type button (Telegram opens it directly, no round-trip to
-// the bot) on its own row — feedback from testing showed people expected
-// tapping something to open the product page, and instead hit "Прибрати"
-// (remove) by mistake since it was the only other button in reach.
-function watchButtonsRows(w: {
-  id: number;
-  url: string;
-  price: string | null;
-  priceTrusted: boolean;
-}): InlineKeyboardButton[][] {
+// Opening the product page is the clickable name link in the message text
+// (watchLink) — Telegram opens plain in-message links in its own in-app
+// browser by default, so a separate button for it is redundant and was
+// getting confused with "Видалити" (delete) sitting right next to it.
+function watchButtonsRows(w: { id: number; price: string | null; priceTrusted: boolean }): InlineKeyboardButton[][] {
   const rows: InlineKeyboardButton[][] = [
-    [{ text: "🔗 Відкрити сайт", url: w.url }],
     [
       { text: `🔄 Перевірити #${w.id}`, callback_data: `chk:${w.id}` },
       { text: `🗑 Видалити #${w.id}`, callback_data: `unw:${w.id}` },
@@ -158,7 +152,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     }
   }
   const keyboard = inserted
-    ? watchButtonsRows({ id: inserted.id, url, price: baseline.price, priceTrusted: baseline.priceTrusted })
+    ? watchButtonsRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted })
     : undefined;
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
@@ -198,7 +192,7 @@ async function buildListView(
   return {
     text: lines.join("\n"),
     keyboard: results.flatMap((w) =>
-      watchButtonsRows({ id: w.id, url: w.url, price: w.last_price, priceTrusted: Boolean(w.price_trusted) })
+      watchButtonsRows({ id: w.id, price: w.last_price, priceTrusted: Boolean(w.price_trusted) })
     ),
   };
 }
