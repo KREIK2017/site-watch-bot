@@ -1,6 +1,11 @@
 import { analyzeUrl, humanizeStatus } from "./checker";
-import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage } from "./telegram";
+import { answerCallbackQuery, editMessageText, escapeHtml, sendMainMenu, sendMessage } from "./telegram";
 import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage, WatchRow } from "./types";
+
+const WELCOME_TEXT = `<b>Site Watch Bot</b>
+Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу сторінки чи вмісту.
+
+Користуйся кнопками знизу або команда <code>/help</code> для повної довідки.`;
 
 const HELP_TEXT = `<b>Site Watch Bot</b>
 Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу сторінки чи вмісту.
@@ -188,10 +193,37 @@ async function handleCheck(env: Env, chatId: number, arg: string): Promise<void>
   await sendMessage(env.BOT_TOKEN, chatId, outcome.text);
 }
 
+// Bare-domain heuristic (no scheme required) so pasting a link straight into
+// the chat works the same as /watch, without the user needing to know the command.
+function looksLikeUrl(token: string): boolean {
+  if (/^https?:\/\//i.test(token)) return true;
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i.test(token);
+}
+
 export async function handleMessage(env: Env, message: TelegramMessage): Promise<void> {
   const chatId = message.chat.id;
   const text = (message.text ?? "").trim();
-  if (!text.startsWith("/")) return;
+
+  if (!text.startsWith("/")) {
+    if (text === "📋 Мої сайти") return handleList(env, chatId);
+    if (text === "❓ Допомога") {
+      await sendMessage(env.BOT_TOKEN, chatId, HELP_TEXT);
+      return;
+    }
+    if (text === "➕ Додати сайт") {
+      await sendMessage(
+        env.BOT_TOKEN,
+        chatId,
+        "Надішли посилання на сайт (за бажанням через пробіл додай CSS-селектор товару), напр.:\nhttps://example.com\nhttps://example.com/product .price"
+      );
+      return;
+    }
+    const firstToken = text.split(/\s+/)[0] ?? "";
+    if (looksLikeUrl(firstToken)) {
+      await handleWatch(env, chatId, text);
+    }
+    return;
+  }
 
   const [rawCommand, ...rest] = text.split(/\s+/);
   const command = rawCommand.split("@")[0].toLowerCase();
@@ -199,6 +231,8 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
 
   switch (command) {
     case "/start":
+      await sendMainMenu(env.BOT_TOKEN, chatId, WELCOME_TEXT);
+      break;
     case "/help":
       await sendMessage(env.BOT_TOKEN, chatId, HELP_TEXT);
       break;

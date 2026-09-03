@@ -26,6 +26,26 @@ export async function sendMessage(
   });
 }
 
+// A persistent reply keyboard (unlike inline buttons) stays docked under the
+// text field across every future message until explicitly replaced, so this
+// only needs to be sent once (on /start) to act as the bot's main menu.
+export async function sendMainMenu(token: string, chatId: number, text: string): Promise<void> {
+  await callTelegram(token, "sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: {
+      keyboard: [
+        [{ text: "📋 Мої сайти" }, { text: "➕ Додати сайт" }],
+        [{ text: "❓ Допомога" }],
+      ],
+      resize_keyboard: true,
+      is_persistent: true,
+    },
+  });
+}
+
 export async function editMessageText(
   token: string,
   chatId: number,
