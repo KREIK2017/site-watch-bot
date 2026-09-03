@@ -1,5 +1,5 @@
 import { analyzeUrl, humanizeStatus } from "./checker";
-import { escapeHtml, sendMessage } from "./telegram";
+import { escapeHtml, sendMessage, watchLink } from "./telegram";
 import type { AnalyzeResult, Env, WatchRow } from "./types";
 
 const CONCURRENCY = 8;
@@ -39,7 +39,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       await sendMessage(
         env.BOT_TOKEN,
         watch.chat_id,
-        `🚨 <b>${escapeHtml(watch.url)}</b>\nПроблема при перевірці: ${escapeHtml(result.error)}`
+        `🚨 <b>${watchLink(watch.url, watch.label)}</b>\nПроблема при перевірці: ${escapeHtml(result.error)}`
       );
     }
     await env.DB.prepare(
@@ -53,16 +53,21 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   const changes = buildChanges(watch, result);
   // A brand-new watch (no baseline yet) just gets its baseline stored, no alert.
   if (changes.length > 0 && watch.last_hash !== null) {
-    const host = new URL(watch.url).hostname;
-    const text = [`🚨 <b>САЙТ ЗМІНИВСЯ</b>`, host, "", "Зміни:", ...changes].join("\n");
+    const text = [
+      `🚨 <b>САЙТ ЗМІНИВСЯ</b>`,
+      watchLink(watch.url, watch.label),
+      "",
+      "Зміни:",
+      ...changes,
+    ].join("\n");
     await sendMessage(env.BOT_TOKEN, watch.chat_id, text);
   }
 
   await env.DB.prepare(
-    `UPDATE watches SET last_status = ?, last_hash = ?, last_price = ?, last_stock = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET label = COALESCE(label, ?), last_status = ?, last_hash = ?, last_price = ?, last_stock = ?, last_checked_at = datetime('now')
      WHERE id = ?`
   )
-    .bind(result.status, result.textHash, result.price, result.stock, watch.id)
+    .bind(result.title, result.status, result.textHash, result.price, result.stock, watch.id)
     .run();
 }
 

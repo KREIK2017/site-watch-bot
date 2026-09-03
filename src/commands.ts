@@ -1,6 +1,14 @@
 import { analyzeUrl, BOT_USER_AGENT, findPriceCandidates, humanizeStatus } from "./checker";
-import { answerCallbackQuery, editMessageText, escapeHtml, sendMainMenu, sendMessage } from "./telegram";
+import { answerCallbackQuery, editMessageText, escapeHtml, sendMainMenu, sendMessage, watchLink } from "./telegram";
 import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage, WatchRow } from "./types";
+
+// "auto:<rule>:<index>" is an internal addressing scheme from the candidate
+// picker, meaningless to a user — only show a selector back when they typed
+// it themselves.
+function describeSelector(selector: string | null): string | null {
+  if (!selector || selector.startsWith("auto:")) return null;
+  return `Елемент: <code>${escapeHtml(selector)}</code>`;
+}
 
 const WELCOME_TEXT = `<b>Site Watch Bot</b>
 Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу сторінки чи вмісту.
@@ -23,7 +31,9 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 Як знайти селектор: відкрий сторінку в браузері → правий клік на ціні/кнопці "Купити" → "Inspect" (Переглянути код) → правий клік на підсвіченому рядку в панелі розробника → Copy → Copy selector.
 
 Якщо ціна на сайті малюється через JavaScript (у сирому HTML її просто немає), можна витягти число напряму з атрибута елемента:
-<code>/watch https://shop.com/product .price @data-price</code>`;
+<code>/watch https://shop.com/product .price @data-price</code>
+
+Посилання на Steam (store.steampowered.com/app/...) обробляються окремо через офіційний Steam API — ціна, знижка і назва гри завжди точні.`;
 
 // The "wrong price?" row only makes sense while the price came from a guess
 // (no pinned selector yet) and there's actually a value to question.
@@ -91,14 +101,15 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
 
   const baseline = await analyzeUrl(url, selector);
   const inserted = await env.DB.prepare(
-    `INSERT INTO watches (chat_id, url, selector, last_status, last_hash, last_price, last_stock, last_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
+    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, last_stock, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
   )
-    .bind(chatId, url, selector, baseline.status, baseline.textHash, baseline.price, baseline.stock)
+    .bind(chatId, url, baseline.title, selector, baseline.status, baseline.textHash, baseline.price, baseline.stock)
     .first<{ id: number }>();
 
-  const lines = [`✅ Стежу за <b>${escapeHtml(url)}</b> (id ${inserted?.id})`];
-  if (selector) lines.push(`Елемент: <code>${escapeHtml(selector)}</code>`);
+  const lines = [`✅ Стежу за <b>${watchLink(url, baseline.title)}</b> (id ${inserted?.id})`];
+  const selectorLine = describeSelector(selector);
+  if (selectorLine) lines.push(selectorLine);
   if (baseline.error) {
     lines.push(`⚠️ ${escapeHtml(baseline.error)}`);
   } else {
@@ -110,14 +121,14 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
 
-type ListRow = Pick<WatchRow, "id" | "url" | "selector" | "last_status" | "last_price" | "last_stock">;
+type ListRow = Pick<WatchRow, "id" | "url" | "label" | "selector" | "last_status" | "last_price" | "last_stock">;
 
 async function buildListView(
   env: Env,
   chatId: number
 ): Promise<{ text: string; keyboard: InlineKeyboardButton[][] }> {
   const { results } = await env.DB.prepare(
-    "SELECT id, url, selector, last_status, last_price, last_stock FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
+    "SELECT id, url, label, selector, last_status, last_price, last_stock FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
   )
     .bind(chatId)
     .all<ListRow>();
@@ -127,10 +138,10 @@ async function buildListView(
   }
 
   const lines = results.map((w) => {
-    const parts = [`#${w.id} ${escapeHtml(w.url)}`, humanizeStatus(w.last_status)];
+    const parts = [`#${w.id} ${watchLink(w.url, w.label)}`, humanizeStatus(w.last_status)];
     if (w.last_price) parts.push(`ціна ${escapeHtml(w.last_price)}`);
     if (w.last_stock) parts.push(escapeHtml(w.last_stock));
-    if (w.selector) parts.push(`[${escapeHtml(w.selector)}]`);
+    if (w.selector) parts.push("🎯");
     return parts.join(" — ");
   });
 
@@ -172,14 +183,15 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
 
   const result = await analyzeUrl(watch.url, watch.selector);
   await env.DB.prepare(
-    `UPDATE watches SET last_status = ?, last_hash = ?, last_price = ?, last_stock = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET label = COALESCE(label, ?), last_status = ?, last_hash = ?, last_price = ?, last_stock = ?, last_checked_at = datetime('now')
      WHERE id = ?`
   )
-    .bind(result.status, result.textHash, result.price, result.stock, id)
+    .bind(result.title, result.status, result.textHash, result.price, result.stock, id)
     .run();
 
-  const lines = [`<b>${escapeHtml(watch.url)}</b>`];
-  if (watch.selector) lines.push(`Елемент: <code>${escapeHtml(watch.selector)}</code>`);
+  const lines = [`<b>${watchLink(watch.url, watch.label ?? result.title)}</b>`];
+  const selectorLine = describeSelector(watch.selector);
+  if (selectorLine) lines.push(selectorLine);
   if (result.error) {
     lines.push(`⚠️ ${escapeHtml(result.error)}`);
   } else {
@@ -293,7 +305,7 @@ async function handleFixButton(env: Env, chatId: number, queryId: string, id: nu
   await sendMessage(
     env.BOT_TOKEN,
     chatId,
-    `Знайшов кілька можливих значень ціни на <b>${escapeHtml(watch.url)}</b>. Яке правильне?`,
+    `Знайшов кілька можливих значень ціни на <b>${watchLink(watch.url, watch.label)}</b>. Яке правильне?`,
     rows
   );
 }

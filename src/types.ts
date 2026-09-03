@@ -49,6 +49,7 @@ export interface WatchRow {
 export interface AnalyzeResult {
   status: number | null;
   sslOk: boolean;
+  title: string | null;
   textHash: string | null;
   price: string | null;
   stock: string | null;

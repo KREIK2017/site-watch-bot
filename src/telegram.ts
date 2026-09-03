@@ -80,3 +80,20 @@ export function escapeHtml(input: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
+
+export function escapeAttr(input: string): string {
+  return escapeHtml(input).replace(/"/g, "&quot;");
+}
+
+// Shows the product/page name (falling back to its hostname) as a tappable
+// link instead of dumping the raw, often very long, URL into the chat.
+export function watchLink(url: string, label: string | null): string {
+  let host = url;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    // keep the raw url as a last resort
+  }
+  const displayText = label || host;
+  return `<a href="${escapeAttr(url)}">${escapeHtml(displayText)}</a>`;
+}

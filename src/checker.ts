@@ -26,20 +26,34 @@ const IN_STOCK_PATTERNS = [
 const PRICE_RE =
   /(?:[$€£₴¥]\s?\d[\d\s.,]{0,12}\d|\d[\d\s.,]{0,12}\d\s?(?:USD|EUR|UAH|GBP|\$|€|£|₴))/i;
 
-export function htmlToText(html: string): string {
-  const withoutNoise = html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<!--[\s\S]*?-->/g, " ");
-  const withoutTags = withoutNoise.replace(/<[^>]+>/g, " ");
-  const decoded = withoutTags
+function decodeEntities(s: string): string {
+  return s
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
-  return decoded.replace(/\s+/g, " ").trim();
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+}
+
+export function htmlToText(html: string): string {
+  const withoutNoise = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ");
+  const withoutTags = withoutNoise.replace(/<[^>]+>/g, " ");
+  return decodeEntities(withoutTags).replace(/\s+/g, " ").trim();
+}
+
+function extractTitleTag(html: string): string | null {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!match) return null;
+  const decoded = decodeEntities(match[1]).replace(/\s+/g, " ").trim();
+  return decoded || null;
 }
 
 export function extractPrice(text: string): string | null {
@@ -80,14 +94,14 @@ function withCurrency(price: string, currency: string | null | undefined): strin
   return `${price} ${currency.trim().toUpperCase()}`;
 }
 
-// Finds a Product/Offer node in a JSON-LD document, which may be a single
-// object, an array of objects, or wrapped in a top-level "@graph" array —
-// all three shapes are common across e-commerce platforms.
-function findOffer(node: unknown): { price?: unknown; priceCurrency?: unknown; availability?: unknown } | null {
+// Finds a Product node in a JSON-LD document, which may be a single object,
+// an array of objects, or wrapped in a top-level "@graph" array — all three
+// shapes are common across e-commerce platforms.
+function findProductNode(node: unknown): Record<string, unknown> | null {
   if (!node || typeof node !== "object") return null;
   if (Array.isArray(node)) {
     for (const item of node) {
-      const found = findOffer(item);
+      const found = findProductNode(item);
       if (found) return found;
     }
     return null;
@@ -95,43 +109,58 @@ function findOffer(node: unknown): { price?: unknown; priceCurrency?: unknown; a
   const obj = node as Record<string, unknown>;
   const type = obj["@type"];
   const types = Array.isArray(type) ? type : [type];
-  if (types.includes("Product") && obj.offers) {
-    const offer = Array.isArray(obj.offers) ? obj.offers[0] : obj.offers;
-    if (offer && typeof offer === "object") {
-      return offer as { price?: unknown; priceCurrency?: unknown; availability?: unknown };
-    }
-  }
-  if (obj["@graph"]) return findOffer(obj["@graph"]);
+  if (types.includes("Product")) return obj;
+  if (obj["@graph"]) return findProductNode(obj["@graph"]);
   return null;
 }
 
 // Most modern storefronts (Shopify, WooCommerce, PrestaShop, Wix...) embed the
-// price/availability as static Schema.org JSON-LD or Open Graph meta tags —
-// meant for Google, but it means the real price often exists in the raw HTML
-// even on sites where the *visible* price is drawn in later by JavaScript.
-// Checking this first lets most /watch calls skip the CSS-selector step.
-function extractStructuredData(html: string): { price: string | null; stock: string | null } {
+// name/price/availability as static Schema.org JSON-LD or Open Graph meta tags
+// — meant for Google, but it means this often exists in the raw HTML even on
+// sites where the *visible* price is drawn in later by JavaScript. Checking
+// this first lets most /watch calls skip the CSS-selector step entirely.
+function extractStructuredData(html: string): { title: string | null; price: string | null; stock: string | null } {
   const scripts = html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
   for (const scriptMatch of scripts) {
     try {
-      const offer = findOffer(JSON.parse(scriptMatch[1].trim()));
-      if (!offer) continue;
-      const rawPrice = offer.price !== undefined && offer.price !== null ? String(offer.price).trim() : null;
-      const currency = typeof offer.priceCurrency === "string" ? offer.priceCurrency : null;
-      const price = rawPrice ? withCurrency(rawPrice, currency) : null;
-      const stock = typeof offer.availability === "string" ? mapAvailability(offer.availability) : null;
-      if (price || stock) return { price, stock };
+      const product = findProductNode(JSON.parse(scriptMatch[1].trim()));
+      if (!product) continue;
+
+      const title = typeof product.name === "string" ? product.name.trim() : null;
+
+      const offersRaw = product.offers;
+      const offer = Array.isArray(offersRaw) ? offersRaw[0] : offersRaw;
+      let price: string | null = null;
+      let stock: string | null = null;
+      if (offer && typeof offer === "object") {
+        const o = offer as Record<string, unknown>;
+        const rawPrice = o.price !== undefined && o.price !== null ? String(o.price).trim() : null;
+        const currency = typeof o.priceCurrency === "string" ? o.priceCurrency : null;
+        price = rawPrice ? withCurrency(rawPrice, currency) : null;
+        stock = typeof o.availability === "string" ? mapAvailability(o.availability) : null;
+      }
+
+      if (title || price || stock) return { title, price, stock };
     } catch {
       // Malformed JSON-LD is common in the wild; just skip that block.
     }
   }
 
+  const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
   const metaPrice = html.match(
     /<meta[^>]+(?:property|name)=["'](?:product:price:amount|price)["'][^>]+content=["']([^"']+)["']/i
   );
-  if (!metaPrice) return { price: null, stock: null };
   const metaCurrency = html.match(/<meta[^>]+property=["']product:price:currency["'][^>]+content=["']([^"']+)["']/i);
-  return { price: withCurrency(metaPrice[1].trim(), metaCurrency?.[1] ?? null), stock: null };
+  return {
+    title: ogTitle ? decodeEntities(ogTitle[1]).trim() : null,
+    price: metaPrice ? withCurrency(metaPrice[1].trim(), metaCurrency?.[1] ?? null) : null,
+    stock: null,
+  };
+}
+
+function extractTitle(html: string): string | null {
+  const raw = extractStructuredData(html).title ?? extractTitleTag(html);
+  return raw ? truncate(raw, 120) : null;
 }
 
 export async function sha256(text: string): Promise<string> {
@@ -274,7 +303,72 @@ export async function findPriceCandidates(response: Response): Promise<PriceCand
 
 export const BOT_USER_AGENT = "Mozilla/5.0 (compatible; SiteWatchBot/1.0)";
 
+const STEAM_APP_RE = /store\.steampowered\.com\/app\/(\d+)/i;
+
+interface SteamPriceOverview {
+  currency: string;
+  final_formatted: string;
+  discount_percent: number;
+}
+
+interface SteamAppData {
+  name?: string;
+  is_free?: boolean;
+  price_overview?: SteamPriceOverview;
+  release_date?: { coming_soon?: boolean };
+}
+
+// Steam ships a free, unauthenticated JSON API with clean name/price data —
+// far more reliable than scraping the store page's HTML for a "special case"
+// this common (game price/discount tracking).
+async function analyzeSteam(appId: string): Promise<AnalyzeResult | null> {
+  try {
+    const res = await fetch(
+      `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=ua&l=ukrainian`,
+      { headers: { "user-agent": BOT_USER_AGENT } }
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as Record<string, { success: boolean; data?: SteamAppData }>;
+    const entry = json[appId];
+    if (!entry?.success || !entry.data) return null;
+
+    const data = entry.data;
+    const title = data.name ? truncate(data.name, 120) : null;
+    let price: string | null = null;
+    let stock: string | null = null;
+
+    if (data.is_free) {
+      price = "Безкоштовно";
+      stock = "В наявності";
+    } else if (data.price_overview) {
+      const po = data.price_overview;
+      price = po.discount_percent > 0 ? `${po.final_formatted} (-${po.discount_percent}%)` : po.final_formatted;
+      stock = "В наявності";
+    } else if (data.release_date?.coming_soon) {
+      stock = "Ще не вийшла (передпродаж/анонс)";
+    }
+
+    return {
+      status: 200,
+      sslOk: true,
+      title,
+      textHash: await sha256(JSON.stringify({ price: data.price_overview, isFree: data.is_free })),
+      price,
+      stock,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function analyzeUrl(url: string, selector?: string | null): Promise<AnalyzeResult> {
+  const steamMatch = url.match(STEAM_APP_RE);
+  if (steamMatch) {
+    const steamResult = await analyzeSteam(steamMatch[1]);
+    if (steamResult) return steamResult;
+    // Fall through to the generic path below if Steam's API is unreachable.
+  }
+
   try {
     const res = await fetch(url, {
       redirect: "follow",
@@ -283,6 +377,7 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
     const status = res.status;
 
     if (selector) {
+      const title = extractTitle(await res.clone().text().catch(() => ""));
       const text = selector.startsWith("auto:")
         ? await extractByAutoSpec(res, selector)
         : await extractBySelector(res, selector);
@@ -290,6 +385,7 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
         return {
           status,
           sslOk: true,
+          title,
           textHash: null,
           price: null,
           stock: null,
@@ -299,6 +395,7 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
       return {
         status,
         sslOk: true,
+        title,
         textHash: await sha256(text),
         price: extractPrice(text),
         stock: extractStock(text),
@@ -308,9 +405,11 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
     const html = await res.text();
     const text = htmlToText(html);
     const structured = extractStructuredData(html);
+    const title = structured.title ?? extractTitleTag(html);
     return {
       status,
       sslOk: true,
+      title: title ? truncate(title, 120) : null,
       textHash: await sha256(text),
       price: structured.price ?? extractPrice(text),
       stock: structured.stock ?? extractStock(text),
@@ -318,6 +417,6 @@ export async function analyzeUrl(url: string, selector?: string | null): Promise
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const sslOk = !/ssl|certificate|tls/i.test(message);
-    return { status: null, sslOk, textHash: null, price: null, stock: null, error: message };
+    return { status: null, sslOk, title: null, textHash: null, price: null, stock: null, error: message };
   }
 }

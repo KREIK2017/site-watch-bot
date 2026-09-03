@@ -1,0 +1,1001 @@
+Так. Я перечитав README цілком. У вас уже **не просто ідея, а робочий MVP**: Worker живий, D1 підключена, Telegram webhook працює, cron кожні 5 хвилин, є автоматичне визначення ціни/наявності, CSS-селектори, ручний вибір правильної ціни, `/list`, `/check`, `/unwatch` тощо. 
+
+Тому я б зараз **не переписував те, що вже працює**, а перетворював це на нормальний продукт.
+
+# 🚨 Site Watch — повна концепція
+
+### Основна ідея
+
+**Site Watch — Telegram-бот, який стежить за сайтами замість тебе.**
+
+Користувач дає URL:
+
+> `https://shop.com/product/iphone`
+
+Site Watch запам'ятовує стан сторінки.
+
+Далі кожні 5 хвилин:
+
+```text
+🌐 Сайт
+   ↓
+🔍 Перевірка
+   ↓
+📊 Порівняння з попереднім станом
+   ↓
+⚠️ Щось змінилося?
+   ↓
+📲 Telegram notification
+```
+
+Причому вже зараз бот вміє контролювати **ціну, наявність, HTTP-статус і загальні зміни контенту**. 
+
+---
+
+# 🎯 Але я б змінив позиціонування
+
+Зараз концепція звучить як:
+
+> «Бот, який перевіряє сайти».
+
+Це трохи нудно.
+
+Краще:
+
+> **"Never miss a change on the web."**
+
+або українською:
+
+> **«Слідкуй за сайтом. Ми повідомимо, коли щось зміниться.»**
+
+Або більш агресивно:
+
+> **«Website changed? You'll know first.»**
+
+Це вже можна продавати не тільки як price tracker.
+
+---
+
+# 🧩 Що саме може відслідковувати Site Watch
+
+Я б зробив **5 основних типів моніторингу**.
+
+### 1. 💰 Price
+
+Наприклад:
+
+```text
+Apple AirPods Pro
+
+Було:
+€249.00
+
+Стало:
+€199.00
+
+📉 -20%
+
+🔗 Відкрити товар
+```
+
+Це вже у вас фактично є через Schema.org / Open Graph і fallback-евристику. 
+
+---
+
+### 2. 📦 Stock
+
+```text
+📦 PRODUCT BACK IN STOCK
+
+Sony WH-1000XM6
+
+Status:
+🔴 Out of stock
+
+        ↓
+
+🟢 IN STOCK
+
+Перевірено: 13:25
+```
+
+Це дуже сильний use-case.
+
+Особливо для:
+
+* електроніки;
+* одягу;
+* кросівок;
+* комплектуючих;
+* collectibles;
+* limited products.
+
+---
+
+# 3. 🌐 Website uptime
+
+Наприклад власник сайту отримує:
+
+```text
+🚨 WEBSITE DOWN
+
+example.com
+
+Status:
+🔴 502 Bad Gateway
+
+Started:
+13:42
+
+Last successful check:
+13:37
+```
+
+А потім:
+
+```text
+🟢 WEBSITE RECOVERED
+
+example.com
+
+Downtime:
+7 minutes
+
+Status:
+200 OK
+```
+
+У вас уже є HTTP-status mapping у зрозумілому для людини форматі. 
+
+---
+
+# 4. 👀 Content change
+
+Оце може стати **найпотужнішою функцією**.
+
+Наприклад користувач каже:
+
+> Слідкуй за цією сторінкою.
+
+А через два дні:
+
+```text
+⚠️ PAGE CHANGED
+
+example.com/pricing
+
+Detected changes:
+
+❌ €49/month
+✅ €59/month
+
+❌ Free plan available
+✅ Free plan removed
+
+Changed:
+2 sections
+```
+
+Тобто це вже не просто price tracker.
+
+---
+
+# 5. 🎯 Element Watch
+
+Це ваша більш просунута функція.
+
+Наприклад:
+
+```text
+/watch https://shop.com/product .price
+```
+
+і бот стежить **тільки за `.price`**.
+
+Це вже реалізовано. Також є читання атрибутів типу `@data-price`. 
+
+Але для користувача я б **не показував CSS як основний UX**.
+
+Бо звичайний Вася не знає, що таке:
+
+```css
+.product > div:nth-child(2) .price
+```
+
+Він просто хоче:
+
+> «Стеж за ціною цього товару».
+
+---
+
+# 🤖 Ось тут можна додати AI
+
+І це, на мою думку, **наступний великий крок**.
+
+Користувач просто кидає URL.
+
+Бот аналізує сторінку:
+
+```text
+🔍 Аналізую сайт...
+
+Я знайшов:
+
+🛒 Product
+iPhone 17 Pro
+
+💰 Price
+€1,199
+
+📦 Availability
+In stock
+
+🌐 Status
+Online
+
+Що контролювати?
+
+[ 💰 Ціну ]
+[ 📦 Наявність ]
+[ 🌐 Все ]
+```
+
+І все.
+
+**Користувач взагалі не знає про CSS selectors.**
+
+А якщо автоматичний parser не знайшов правильний елемент — тоді вже:
+
+> «Не можу точно визначити ціну. Ось знайдені варіанти:»
+
+і ваш уже існуючий механізм **"❔ Не та ціна?"** чудово сюди лягає. 
+
+---
+
+# 📲 UX я б побудував ось так
+
+Користувач натискає:
+
+**➕ Додати сайт**
+
+Бот:
+
+> 🔗 Надішли URL сайту або товару.
+
+Пользователь:
+
+> `https://example.com/product`
+
+Бот:
+
+> 🔍 Аналізую...
+
+Через пару секунд:
+
+```text
+🌐 Сайт знайдено
+
+Apple AirPods Pro
+
+💰 €199
+📦 В наявності
+🟢 Online
+
+Що контролювати?
+
+[💰 Ціна]
+[📦 Наявність]
+[🌐 Все]
+```
+
+Користувач:
+
+> 💰 Ціна
+
+Бот:
+
+```text
+✅ Моніторинг активовано
+
+AirPods Pro
+
+💰 €199
+
+Я перевірятиму сайт кожні 5 хвилин.
+
+Я повідомлю тебе, якщо:
+
+📉 ціна зміниться
+🔴 товар закінчиться
+🟢 товар знову з'явиться
+🌐 сторінка стане недоступною
+```
+
+---
+
+# 🔔 Система повідомлень
+
+Це треба зробити **дуже красивою**.
+
+Не:
+
+> Price changed from 199 to 189.
+
+А:
+
+```text
+🔔 PRICE DROP
+
+AirPods Pro
+
+€199 → €179
+
+📉 −10.1%
+
+━━━━━━━━━━━━━━
+
+Було:
+€199
+
+Стало:
+€179
+
+━━━━━━━━━━━━━━
+
+🕐 13:25
+
+[ 🛒 Відкрити товар ]
+[ 🔕 Вимкнути ]
+```
+
+---
+
+# 📦 Stock alert
+
+```text
+🟢 BACK IN STOCK
+
+RTX 5090
+
+Статус:
+
+🔴 Out of stock
+        ↓
+🟢 In stock
+
+Перевірено:
+13:25
+
+[ 🛒 Відкрити ]
+```
+
+---
+
+# 🚨 Website Down
+
+```text
+🚨 WEBSITE DOWN
+
+example.com
+
+🔴 503 Service Unavailable
+
+Сайт недоступний вже:
+5 хвилин
+
+Last successful check:
+13:15
+
+[ 🌐 Відкрити ]
+```
+
+---
+
+# 🟢 Recovery
+
+А коли повернувся:
+
+```text
+🟢 WEBSITE RECOVERED
+
+example.com
+
+Сайт знову працює.
+
+Downtime:
+8 minutes
+
+Status:
+200 OK
+```
+
+---
+
+# 🧠 Історія змін
+
+Оце я б **обов'язково додав**.
+
+Зараз у вас фактично є current state + watches.
+
+Наступний рівень:
+
+```text
+📊 AirPods Pro
+
+PRICE HISTORY
+
+€249 ┤●
+€229 ┤  ●
+€219 ┤    ●
+€199 ┤      ●
+€179 ┤         ●
+     └────────────
+      Aug       Sep
+```
+
+У Telegram можна зробити:
+
+**📈 Історія**
+
+і бот показує:
+
+```text
+💰 Price history
+
+Current: €179
+Highest: €249
+Lowest: €179
+
+Changes:
+Sep 1 — €199
+Sep 2 — €189
+Sep 3 — €179
+```
+
+---
+
+# 🧑‍💼 B2B напрямок
+
+І тут проект стає набагато цікавішим.
+
+Не тільки:
+
+> «Хочу купити дешевше».
+
+А:
+
+### Для власника сайту
+
+> «Повідом мене, якщо сайт впаде».
+
+### Для SEO
+
+> «Повідом мене, якщо title/description змінилися».
+
+### Для маркетолога
+
+> «Повідом мене, якщо конкурент змінив ціну».
+
+### Для магазину
+
+> «Повідом мене, коли товар закінчився».
+
+### Для QA
+
+> «Повідом мене, якщо checkout/page змінився».
+
+### Для агентства
+
+> «Слідкуй за 50 клієнтськими сайтами».
+
+І ось **B2B вже може бути основною монетизацією.**
+
+---
+
+# 🕵️ Конкурентний моніторинг
+
+Це дуже хороший напрям.
+
+Наприклад:
+
+```text
+Competitor Watch
+
+Nike Store
+Adidas
+Puma
+New Balance
+```
+
+І бот:
+
+```text
+⚠️ COMPETITOR CHANGE
+
+Competitor: Adidas
+
+Product:
+Ultraboost 5
+
+Price:
+€180 → €150
+
+📉 −16.7%
+```
+
+Або:
+
+```text
+⚠️ COMPETITOR STOCK
+
+Nike
+
+Air Max 95
+
+🔴 Out of stock
+```
+
+---
+
+# 🛍️ Price intelligence
+
+Тоді можна зробити:
+
+> **"Monitor competitors automatically."**
+
+Компанія додає 20–100 товарів.
+
+Site Watch збирає:
+
+```text
+PRODUCT             YOU       COMPETITOR
+
+AirPods Pro          €199      €189 🔴
+
+Sony XM6             €399      €429 🟢
+
+iPhone 17 Pro        €1199     €1199 =
+```
+
+Це вже **не Telegram toy**, а SaaS.
+
+---
+
+# 🏗️ Архітектура
+
+Ваш нинішній стек для MVP дуже хороший.
+
+Зараз:
+
+```text
+Telegram
+    ↓
+Cloudflare Worker
+    ↓
+D1
+    ↓
+Cron */5
+    ↓
+fetch()
+    ↓
+HTML parser
+    ↓
+comparison
+    ↓
+Telegram
+```
+
+README підтверджує саме цю архітектуру: Workers + D1 + Cron + Telegram webhook. 
+
+Я б розвивав її так:
+
+```text
+                     ┌──────────────┐
+                     │   Telegram   │
+                     └──────┬───────┘
+                            │
+                            ▼
+                    ┌───────────────┐
+                    │ CF Worker API │
+                    └───────┬───────┘
+                            │
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+            D1            KV            R2
+          users         cache          files
+              │
+              ▼
+          Watch Engine
+              │
+       ┌──────┼───────┐
+       ▼      ▼       ▼
+     Price  Stock   Content
+       │      │       │
+       └──────┼───────┘
+              ▼
+         Change Engine
+              │
+              ▼
+           Alerts
+              │
+              ▼
+          Telegram
+```
+
+---
+
+# ⚠️ Головна технічна проблема зараз
+
+Я б поставив її **№1 у roadmap**.
+
+У README прямо зазначено:
+
+> Worker робить `fetch()` сирого HTML і **JavaScript не виконується**. 
+
+Через це SPA можуть ламатися.
+
+Наприклад:
+
+```text
+Browser:
+
+HTML
+ ↓
+JavaScript
+ ↓
+API
+ ↓
+Product
+ ↓
+€499
+```
+
+А Worker бачить:
+
+```text
+HTML
+ ↓
+"Loading..."
+```
+
+Тому наступний серйозний рівень:
+
+### Browser Rendering
+
+```text
+Worker
+   ↓
+Browser Rendering
+   ↓
+Real Chromium
+   ↓
+JS executes
+   ↓
+DOM
+   ↓
+Price / Stock / Content
+```
+
+Але у README правильно зазначено, що це вже має додаткову вартість. 
+
+Я б **не підключав це всім одразу**.
+
+Тільки коли звичайний fetch не може отримати потрібні дані.
+
+---
+
+# 🧠 Smart fallback
+
+Ідеальний алгоритм:
+
+```text
+             URL
+              │
+              ▼
+        Normal fetch
+              │
+        ┌─────┴─────┐
+        │           │
+      FOUND       FAILED
+        │           │
+        ▼           ▼
+     Extract    Browser
+                  Render
+                    │
+                    ▼
+                 Extract
+```
+
+Тобто:
+
+**95% сайтів → дешевий fetch**
+
+**складні сайти → Browser Rendering**
+
+Це сильно зменшить витрати.
+
+---
+
+# 🚧 Cloudflare Bot Management
+
+Ще одна реальна проблема вже зафіксована у вашому README: деякі сайти, зокрема Rozetka, блокують запити з Workers через Cloudflare Bot Management. 
+
+Я б **не намагався обходити це всіма можливими User-Agent хитрощами**.
+
+Краще:
+
+```text
+fetch
+ ↓
+403 / bot protection
+ ↓
+⚠️ Protected website
+ ↓
+Browser Rendering / external scraping provider
+```
+
+А користувачу:
+
+> «Цей сайт захищений від автоматичних запитів. Для цього моніторингу потрібен Advanced Monitor.»
+
+І це навіть можна перетворити на **платну функцію**.
+
+---
+
+# 💰 Монетизація
+
+Я б зробив 3 тарифи.
+
+### FREE
+
+```text
+€0
+
+3 websites
+5 min checks
+Basic alerts
+Price monitoring
+Stock monitoring
+```
+
+### PRO
+
+```text
+€5 / month
+
+50 websites
+1 min checks
+Price history
+Content monitoring
+Advanced selectors
+Priority checks
+```
+
+### BUSINESS
+
+```text
+€19–29 / month
+
+500 websites
+30 sec–5 min checks
+Team members
+Competitor monitoring
+Browser rendering
+Advanced alerts
+API
+```
+
+---
+
+# 🚀 А ще можно продавати API
+
+Пізніше:
+
+```text
+POST /watch
+
+{
+  "url": "...",
+  "selector": ".price"
+}
+```
+
+І:
+
+```text
+GET /watch/:id
+GET /watch/:id/history
+```
+
+Тоді Telegram — просто **один із клієнтів**.
+
+---
+
+# 📊 Dashboard
+
+Я б не поспішав робити його зараз.
+
+Але V2:
+
+```text
+sitewatch.app
+```
+
+Логін.
+
+### Dashboard
+
+```text
+┌──────────────────────────────────────────┐
+│ Site Watch                               │
+│                                          │
+│ 47 Websites        2 Alerts              │
+│                                          │
+│ 🟢 44 Online                             │
+│ 🔴 2 Problems                            │
+│ 🟡 1 Changed                             │
+│                                          │
+│ ───────────────────────────────────────  │
+│                                          │
+│ AirPods Pro          €179   🟢           │
+│ RTX 5090             €1999  🔴           │
+│ My Website           200    🟢           │
+└──────────────────────────────────────────┘
+```
+
+Telegram залишається головним UX, а dashboard — для advanced users.
+
+---
+
+# 📈 Roadmap, який я б запропонував
+
+### 🟢 V1 — вже фактично є
+
+* Telegram bot
+* URL monitoring
+* Price
+* Stock
+* HTTP
+* Content
+* CSS selector
+* attribute extraction
+* cron
+* alerts
+* D1
+* webhook
+* автоматичний deploy
+
+Це все вже описано як готове у README. 
+
+### 🟡 V1.5 — зробити продуктом
+
+**Я б робив це зараз:**
+
+1. Нормальний onboarding
+2. Красиві alerts
+3. Назви watch-ів
+4. Price history
+5. Stock history
+6. Alert settings
+7. `/pause`
+8. `/resume`
+9. `/settings`
+10. Частота перевірки
+11. Вибір типу моніторингу
+12. Smart detection
+13. Видалення false-positive
+14. Retry logic
+15. Error states
+
+---
+
+### 🟠 V2
+
+1. Browser Rendering
+2. JS websites
+3. Screenshot on change
+4. Visual comparison
+5. AI change summary
+6. Competitor monitoring
+7. Multiple notification channels
+8. Web dashboard
+
+---
+
+### 🔴 V3 — SaaS
+
+```text
+Telegram
++
+Web Dashboard
++
+API
++
+Teams
++
+Billing
++
+Analytics
+```
+
+---
+
+# 🤯 І найцікавіша функція — AI Change Summary
+
+Уяви:
+
+Бот побачив, що сторінка змінилася.
+
+Замість:
+
+> `Content hash changed.`
+
+він робить:
+
+```text
+🤖 WEBSITE CHANGE
+
+example.com/pricing
+
+Я знайшов 3 зміни:
+
+1. 💰 Pro plan
+   €49 → €59
+
+2. 📝 New feature
+   "AI Reports" was added
+
+3. ❌ Free trial
+   "14 days free" was removed
+
+⚠️ Найважливіша зміна:
+ціна Pro plan збільшилась на 20%.
+```
+
+**Оце вже killer feature.**
+
+Бо користувачу не треба самому відкривати сайт і шукати, **що саме змінилось**.
+
+---
+
+# 🎯 Яке позиціонування я б вибрав
+
+Я б не робив:
+
+> **Site Watch — Telegram price tracker**
+
+Занадто вузько.
+
+Я б зробив:
+
+# **Site Watch**
+
+### *Your websites. Always watched.*
+
+А всередині:
+
+**Monitor anything:**
+
+💰 Price
+📦 Stock
+🌐 Uptime
+📝 Content
+🎯 Elements
+👀 Competitors
+🤖 AI Changes
+
+---
+
+## І найголовніше
+
+У вас уже є фундамент, який **не треба викидати**.
+
+README показує, що ви вже пройшли найнеприємнішу частину: deployment, webhook, D1, cron, extraction, selectors, fallback price detection і Telegram UI. 
+
+Тому я б зараз **не витрачав час на "ще одну фічу моніторингу"**.
+
+Наступний етап — **перетворити технічний MVP на продукт**:
+
+> **URL → автоматичне розуміння сторінки → вибір, що моніторити → красиве повідомлення → історія → AI пояснює зміни → платний план.**
+
+І саме **AI Change Summary + Price/Stock monitoring + Competitor Watch** я бачу як найсильнішу комбінацію для першої комерційної версії.
