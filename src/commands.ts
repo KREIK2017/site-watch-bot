@@ -1,4 +1,4 @@
-import { analyzeUrl, humanizeStatus } from "./checker";
+import { analyzeUrl, BOT_USER_AGENT, findPriceCandidates, humanizeStatus } from "./checker";
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMainMenu, sendMessage } from "./telegram";
 import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage, WatchRow } from "./types";
 
@@ -25,11 +25,19 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 Якщо ціна на сайті малюється через JavaScript (у сирому HTML її просто немає), можна витягти число напряму з атрибута елемента:
 <code>/watch https://shop.com/product .price @data-price</code>`;
 
-function watchButtonsRow(id: number): InlineKeyboardButton[] {
-  return [
-    { text: `🔄 Перевірити #${id}`, callback_data: `chk:${id}` },
-    { text: `🗑 Прибрати #${id}`, callback_data: `unw:${id}` },
+// The "wrong price?" row only makes sense while the price came from a guess
+// (no pinned selector yet) and there's actually a value to question.
+function watchButtonsRows(w: { id: number; selector: string | null; price: string | null }): InlineKeyboardButton[][] {
+  const rows: InlineKeyboardButton[][] = [
+    [
+      { text: `🔄 Перевірити #${w.id}`, callback_data: `chk:${w.id}` },
+      { text: `🗑 Прибрати #${w.id}`, callback_data: `unw:${w.id}` },
+    ],
   ];
+  if (!w.selector && w.price) {
+    rows.push([{ text: `❔ Не та ціна? #${w.id}`, callback_data: `fix:${w.id}` }]);
+  }
+  return rows;
 }
 
 function normalizeUrl(input: string): string | null {
@@ -98,7 +106,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     if (baseline.price) lines.push(`Ціна: ${escapeHtml(baseline.price)}`);
     if (baseline.stock) lines.push(`Наявність: ${escapeHtml(baseline.stock)}`);
   }
-  const keyboard = inserted ? [watchButtonsRow(inserted.id)] : undefined;
+  const keyboard = inserted ? watchButtonsRows({ id: inserted.id, selector, price: baseline.price }) : undefined;
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
 
@@ -126,7 +134,10 @@ async function buildListView(
     return parts.join(" — ");
   });
 
-  return { text: lines.join("\n"), keyboard: results.map((w) => watchButtonsRow(w.id)) };
+  return {
+    text: lines.join("\n"),
+    keyboard: results.flatMap((w) => watchButtonsRows({ id: w.id, selector: w.selector, price: w.last_price })),
+  };
 }
 
 async function handleList(env: Env, chatId: number): Promise<void> {
@@ -253,11 +264,69 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
   }
 }
 
+async function handleFixButton(env: Env, chatId: number, queryId: string, id: number): Promise<void> {
+  const watch = await env.DB.prepare("SELECT * FROM watches WHERE id = ? AND chat_id = ? AND active = 1")
+    .bind(id, chatId)
+    .first<WatchRow>();
+  if (!watch) {
+    await answerCallbackQuery(env.BOT_TOKEN, queryId, "Не знайдено");
+    return;
+  }
+
+  let candidates: Awaited<ReturnType<typeof findPriceCandidates>> = [];
+  try {
+    const res = await fetch(watch.url, { redirect: "follow", headers: { "user-agent": BOT_USER_AGENT } });
+    candidates = await findPriceCandidates(res);
+  } catch {
+    // fall through with an empty list, handled below
+  }
+
+  if (!candidates.length) {
+    await answerCallbackQuery(env.BOT_TOKEN, queryId, "Не знайшов інших варіантів на сторінці");
+    return;
+  }
+
+  await answerCallbackQuery(env.BOT_TOKEN, queryId);
+  const rows = candidates.map((c) => [
+    { text: `💰 ${c.value}`, callback_data: `pick:${id}:${c.ruleId}:${c.index}` },
+  ]);
+  await sendMessage(
+    env.BOT_TOKEN,
+    chatId,
+    `Знайшов кілька можливих значень ціни на <b>${escapeHtml(watch.url)}</b>. Яке правильне?`,
+    rows
+  );
+}
+
+async function handlePickCandidate(
+  env: Env,
+  chatId: number,
+  queryId: string,
+  id: number,
+  ruleId: string,
+  indexRaw: string
+): Promise<void> {
+  const selector = `auto:${ruleId}:${indexRaw}`;
+  const result = await env.DB.prepare(
+    "UPDATE watches SET selector = ? WHERE id = ? AND chat_id = ? AND active = 1"
+  )
+    .bind(selector, id, chatId)
+    .run();
+  if (!(result.meta.changes ?? 0)) {
+    await answerCallbackQuery(env.BOT_TOKEN, queryId, "Не знайдено");
+    return;
+  }
+
+  const outcome = await runCheck(env, chatId, id);
+  await answerCallbackQuery(env.BOT_TOKEN, queryId, "Збережено ✅");
+  if (outcome) await sendMessage(env.BOT_TOKEN, chatId, outcome.text);
+}
+
 export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery): Promise<void> {
   const chatId = query.message?.chat.id;
   const messageId = query.message?.message_id;
   const data = query.data ?? "";
-  const [action, idRaw] = data.split(":");
+  const [action, idRaw, ...rest] = data.split(":");
   const id = Number(idRaw);
 
   if (!chatId || !messageId || !Number.isInteger(id)) {
@@ -285,6 +354,19 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
       await editMessageText(env.BOT_TOKEN, chatId, messageId, text, keyboard);
     }
     return;
+  }
+
+  if (action === "fix") {
+    await handleFixButton(env, chatId, query.id, id);
+    return;
+  }
+
+  if (action === "pick") {
+    const [ruleId, indexRaw] = rest;
+    if (ruleId && indexRaw) {
+      await handlePickCandidate(env, chatId, query.id, id, ruleId, indexRaw);
+      return;
+    }
   }
 
   await answerCallbackQuery(env.BOT_TOKEN, query.id);

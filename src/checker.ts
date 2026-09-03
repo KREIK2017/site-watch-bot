@@ -73,10 +73,17 @@ function mapAvailability(raw: string): string | null {
   return key ? AVAILABILITY_MAP[key] ?? null : null;
 }
 
+// A bare number ("36.32") is ambiguous without a currency; attach one only
+// when the value doesn't already carry a symbol/code of its own.
+function withCurrency(price: string, currency: string | null | undefined): string {
+  if (!currency || /[a-zA-Z₴$€£¥]/.test(price)) return price;
+  return `${price} ${currency.trim().toUpperCase()}`;
+}
+
 // Finds a Product/Offer node in a JSON-LD document, which may be a single
 // object, an array of objects, or wrapped in a top-level "@graph" array —
 // all three shapes are common across e-commerce platforms.
-function findOffer(node: unknown): { price?: unknown; availability?: unknown } | null {
+function findOffer(node: unknown): { price?: unknown; priceCurrency?: unknown; availability?: unknown } | null {
   if (!node || typeof node !== "object") return null;
   if (Array.isArray(node)) {
     for (const item of node) {
@@ -90,7 +97,9 @@ function findOffer(node: unknown): { price?: unknown; availability?: unknown } |
   const types = Array.isArray(type) ? type : [type];
   if (types.includes("Product") && obj.offers) {
     const offer = Array.isArray(obj.offers) ? obj.offers[0] : obj.offers;
-    if (offer && typeof offer === "object") return offer as { price?: unknown; availability?: unknown };
+    if (offer && typeof offer === "object") {
+      return offer as { price?: unknown; priceCurrency?: unknown; availability?: unknown };
+    }
   }
   if (obj["@graph"]) return findOffer(obj["@graph"]);
   return null;
@@ -107,7 +116,9 @@ function extractStructuredData(html: string): { price: string | null; stock: str
     try {
       const offer = findOffer(JSON.parse(scriptMatch[1].trim()));
       if (!offer) continue;
-      const price = offer.price !== undefined && offer.price !== null ? String(offer.price).trim() : null;
+      const rawPrice = offer.price !== undefined && offer.price !== null ? String(offer.price).trim() : null;
+      const currency = typeof offer.priceCurrency === "string" ? offer.priceCurrency : null;
+      const price = rawPrice ? withCurrency(rawPrice, currency) : null;
       const stock = typeof offer.availability === "string" ? mapAvailability(offer.availability) : null;
       if (price || stock) return { price, stock };
     } catch {
@@ -118,7 +129,9 @@ function extractStructuredData(html: string): { price: string | null; stock: str
   const metaPrice = html.match(
     /<meta[^>]+(?:property|name)=["'](?:product:price:amount|price)["'][^>]+content=["']([^"']+)["']/i
   );
-  return { price: metaPrice ? metaPrice[1].trim() : null, stock: null };
+  if (!metaPrice) return { price: null, stock: null };
+  const metaCurrency = html.match(/<meta[^>]+property=["']product:price:currency["'][^>]+content=["']([^"']+)["']/i);
+  return { price: withCurrency(metaPrice[1].trim(), metaCurrency?.[1] ?? null), stock: null };
 }
 
 export async function sha256(text: string): Promise<string> {
@@ -174,16 +187,105 @@ async function extractBySelector(response: Response, spec: string): Promise<stri
   return captured.replace(/\s+/g, " ").trim();
 }
 
+// Fixed rules used to hunt for price-shaped values without the user ever
+// writing CSS themselves. Short ids so they fit in a Telegram callback_data
+// (max 64 bytes) as "auto:<id>:<occurrence index>".
+const CANDIDATE_RULES: { id: string; selector: string; attr: string | null }[] = [
+  { id: "sp", selector: "[data-special-price]", attr: "data-special-price" },
+  { id: "dp", selector: "[data-price]", attr: "data-price" },
+  { id: "dv", selector: "[data-value]", attr: "data-value" },
+  { id: "ip", selector: '[itemprop="price"]', attr: null },
+  { id: "cp", selector: '[class*="price"]', attr: null },
+];
+
+function isPriceLike(value: string): boolean {
+  return PRICE_RE.test(value) || /^\d[\d\s.,]{0,12}\d$|^\d$/.test(value.trim());
+}
+
+// Collects every match for one rule, in document order, one entry per
+// matched element (not per text chunk) — needed so "auto:cp:2" reliably
+// means "the 3rd .price-ish element" on later checks.
+async function scanRuleMatches(response: Response, selector: string, attr: string | null): Promise<string[]> {
+  const values: string[] = [];
+  let current = -1;
+  const rewriter = new HTMLRewriter().on(
+    selector,
+    attr
+      ? {
+          element(el) {
+            values.push(el.getAttribute(attr) ?? "");
+          },
+        }
+      : {
+          element() {
+            values.push("");
+            current = values.length - 1;
+          },
+          text(chunk) {
+            if (current >= 0) values[current] += chunk.text;
+          },
+        }
+  );
+  await rewriter.transform(response).text();
+  return values.map((v) => v.replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+async function extractByAutoSpec(response: Response, spec: string): Promise<string> {
+  const [, ruleId, indexRaw] = spec.split(":");
+  const rule = CANDIDATE_RULES.find((r) => r.id === ruleId);
+  const index = Number(indexRaw);
+  if (!rule || !Number.isInteger(index)) return "";
+  const values = await scanRuleMatches(response, rule.selector, rule.attr);
+  return values[index] ?? "";
+}
+
+export interface PriceCandidate {
+  ruleId: string;
+  index: number;
+  value: string;
+}
+
+// Powers the "❔ Wrong price?" button: re-fetches the page and surfaces every
+// plausible price-shaped value found on it, deduped, so the user can just tap
+// the correct one instead of ever writing a CSS selector.
+export async function findPriceCandidates(response: Response): Promise<PriceCandidate[]> {
+  const found: PriceCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const rule of CANDIDATE_RULES) {
+    let values: string[];
+    try {
+      values = await scanRuleMatches(response.clone(), rule.selector, rule.attr);
+    } catch {
+      continue;
+    }
+    values.forEach((value, index) => {
+      if (!isPriceLike(value)) return;
+      const key = value.replace(/\s+/g, "");
+      if (seen.has(key)) return;
+      seen.add(key);
+      found.push({ ruleId: rule.id, index, value });
+    });
+    if (found.length >= 6) break;
+  }
+
+  return found.slice(0, 6);
+}
+
+export const BOT_USER_AGENT = "Mozilla/5.0 (compatible; SiteWatchBot/1.0)";
+
 export async function analyzeUrl(url: string, selector?: string | null): Promise<AnalyzeResult> {
   try {
     const res = await fetch(url, {
       redirect: "follow",
-      headers: { "user-agent": "Mozilla/5.0 (compatible; SiteWatchBot/1.0)" },
+      headers: { "user-agent": BOT_USER_AGENT },
     });
     const status = res.status;
 
     if (selector) {
-      const text = await extractBySelector(res, selector);
+      const text = selector.startsWith("auto:")
+        ? await extractByAutoSpec(res, selector)
+        : await extractBySelector(res, selector);
       if (!text) {
         return {
           status,

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -o /dev/null -w \"curl \\(моя мережа\\): HTTP %{http_code}\\\\n\" -A \"Mozilla/5.0 \\(compatible; SiteWatchBot/1.0\\)\" \"https://rozetka.com.ua/ua/armorstandart-arm71689/p431139539/\")",
+      "Bash(curl -s -o /dev/null -w \"curl зі звичайним UA браузера: HTTP %{http_code}\\\\n\" -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0 Safari/537.36\" \"https://rozetka.com.ua/ua/armorstandart-arm71689/p431139539/\")",
+      "Bash(curl -s -D - -o /dev/null \"https://rozetka.com.ua/ua/armorstandart-arm71689/p431139539/\" -A \"Mozilla/5.0 \\(compatible; SiteWatchBot/1.0\\)\")",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
