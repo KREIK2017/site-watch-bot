@@ -158,8 +158,18 @@ function extractStructuredData(html: string): { title: string | null; price: str
   };
 }
 
+// Some large sites (Amazon: <meta property="og:title" content="Amazon"/>) set
+// a deliberately generic og:title for social-share cards while the real,
+// specific product name only lives in <title> — prefer whichever is longer
+// rather than trusting og:title/JSON-LD unconditionally.
+function pickTitle(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  return b.length > a.length ? b : a;
+}
+
 function extractTitle(html: string): string | null {
-  const raw = extractStructuredData(html).title ?? extractTitleTag(html);
+  const raw = pickTitle(extractStructuredData(html).title, extractTitleTag(html));
   return raw ? truncate(raw, 120) : null;
 }
 
@@ -456,7 +466,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
     const html = await res.text();
     const text = htmlToText(html);
     const structured = ok ? extractStructuredData(html) : { title: null, price: null, stock: null };
-    const title = ok ? structured.title ?? extractTitleTag(html) : null;
+    const title = ok ? pickTitle(structured.title, extractTitleTag(html)) : null;
     return {
       status,
       sslOk: true,
@@ -472,8 +482,15 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       stock: ok ? structured.stock ?? extractStock(text) : null,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const sslOk = !/ssl|certificate|tls/i.test(message);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const sslOk = !/ssl|certificate|tls/i.test(rawMessage);
+    // A redirect-loop error dumps the entire chain of URLs it followed into
+    // the message, which is both unreadable and can badly overflow a
+    // Telegram message; a fetch failure can in general say anything, so cap
+    // every message defensively rather than trusting it to stay short.
+    const message = /too many redirect/i.test(rawMessage)
+      ? "Забагато перенаправлень — сайт зациклився на редиректах"
+      : truncate(rawMessage, 200);
     return {
       status: null,
       sslOk,
