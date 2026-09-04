@@ -40,7 +40,7 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 
 <b>Команди:</b>
 /watch &lt;url&gt; — почати стежити
-/list — мої сайти
+/list — мої сайти (тисни ⚙️ #id, щоб керувати конкретним)
 /check &lt;id&gt; — перевірити зараз
 /history &lt;id&gt; — історія цін/наявності
 /rename &lt;id&gt; &lt;назва&gt; — перейменувати
@@ -58,25 +58,43 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 
 // Opening the product page is the clickable name link in the message text
 // (watchLink) — Telegram opens plain in-message links in its own in-app
-// browser by default, so a separate button for it is redundant and was
-// getting confused with "Видалити" (delete) sitting right next to it.
-function watchButtonsRows(w: {
-  id: number;
-  price: string | null;
-  priceTrusted: boolean;
-  paused: boolean;
-}): InlineKeyboardButton[][] {
+// browser by default, so a separate button for it is redundant.
+//
+// Full action set for ONE watch — used on its own confirmation message
+// (/watch, freshly created) and on the single-item "management card" (see
+// buildDetailView). Never attached to the multi-item /list message: with
+// several watches, stacking every action for every row made it impossible
+// to tell which button belonged to which line (Telegram always renders all
+// of a message's buttons as one block at the very bottom, not next to the
+// line they relate to).
+function actionRows(
+  w: { id: number; price: string | null; priceTrusted: boolean; paused: boolean },
+  opts: { back?: boolean } = {}
+): InlineKeyboardButton[][] {
   const rows: InlineKeyboardButton[][] = [
     [
-      { text: `🔄 Перевірити #${w.id}`, callback_data: `chk:${w.id}` },
-      { text: `🗑 Видалити #${w.id}`, callback_data: `unw:${w.id}` },
+      { text: "🔄 Перевірити", callback_data: `chk:${w.id}` },
+      w.paused
+        ? { text: "▶️ Відновити", callback_data: `res:${w.id}` }
+        : { text: "⏸ Пауза", callback_data: `pau:${w.id}` },
     ],
-    w.paused
-      ? [{ text: `▶️ Відновити #${w.id}`, callback_data: `res:${w.id}` }]
-      : [{ text: `⏸ Пауза #${w.id}`, callback_data: `pau:${w.id}` }],
+    [{ text: "🗑 Видалити", callback_data: `unw:${w.id}` }],
   ];
   if (w.price && !w.priceTrusted) {
-    rows.push([{ text: `❔ Не та ціна? #${w.id}`, callback_data: `fix:${w.id}` }]);
+    rows.push([{ text: "❔ Не та ціна?", callback_data: `fix:${w.id}` }]);
+  }
+  if (opts.back) {
+    rows.push([{ text: "⬅️ До списку", callback_data: "back" }]);
+  }
+  return rows;
+}
+
+// The /list overview instead gets one small "⚙️ #id" button per watch, a few
+// per row — tapping one opens that single watch's management card.
+function manageButtonRows(ids: number[]): InlineKeyboardButton[][] {
+  const rows: InlineKeyboardButton[][] = [];
+  for (let i = 0; i < ids.length; i += 4) {
+    rows.push(ids.slice(i, i + 4).map((id) => ({ text: `⚙️ #${id}`, callback_data: `mgr:${id}` })));
   }
   return rows;
 }
@@ -196,7 +214,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     }
   }
   const keyboard = inserted
-    ? watchButtonsRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted, paused: false })
+    ? actionRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted, paused: false })
     : undefined;
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
@@ -246,20 +264,48 @@ async function buildListView(
 
   return {
     text: lines.join("\n"),
-    keyboard: results.flatMap((w) =>
-      watchButtonsRows({
-        id: w.id,
-        price: w.last_price,
-        priceTrusted: Boolean(w.price_trusted),
-        paused: Boolean(w.paused),
-      })
-    ),
+    keyboard: manageButtonRows(results.map((w) => w.id)),
   };
 }
 
 async function handleList(env: Env, chatId: number): Promise<void> {
   const { text, keyboard } = await buildListView(env, chatId);
   await sendMessage(env.BOT_TOKEN, chatId, text, keyboard.length ? keyboard : undefined);
+}
+
+// The single-watch "management card" a "⚙️ #id" button opens — full detail,
+// full action set, and a way back to the overview. Reused after any action
+// taken from the card (check/pause/resume) so the card refreshes in place.
+async function buildDetailView(
+  env: Env,
+  chatId: number,
+  id: number
+): Promise<{ text: string; keyboard: InlineKeyboardButton[][] } | null> {
+  const watch = await env.DB.prepare("SELECT * FROM watches WHERE id = ? AND chat_id = ? AND active = 1")
+    .bind(id, chatId)
+    .first<WatchRow>();
+  if (!watch) return null;
+
+  const lines = [`<b>${watchLink(watch.url, watch.label)}</b> (id ${watch.id})`];
+  if (watch.paused) lines.push("⏸ На паузі — перевірки не виконуються");
+  const selectorLine = describeSelector(watch.selector);
+  if (selectorLine) lines.push(selectorLine);
+  lines.push(`Статус: ${humanizeStatus(watch.last_status)}`);
+  const currency = await getChatCurrency(env, chatId);
+  const priceDisplay = await convertPrice(env, watch.last_price, currency);
+  if (priceDisplay) lines.push(`Ціна: ${escapeHtml(priceDisplay)}`);
+  if (watch.last_stock) lines.push(`Наявність: ${escapeHtml(watch.last_stock)}`);
+  if (!watch.last_price && !watch.last_stock && watch.last_value) {
+    lines.push(`Значення: ${escapeHtml(watch.last_value)}`);
+  }
+
+  return {
+    text: lines.join("\n"),
+    keyboard: actionRows(
+      { id: watch.id, price: watch.last_price, priceTrusted: Boolean(watch.price_trusted), paused: Boolean(watch.paused) },
+      { back: true }
+    ),
+  };
 }
 
 async function handleUnwatch(env: Env, chatId: number, arg: string): Promise<void> {
@@ -592,16 +638,35 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
     return;
   }
 
+  if (action === "back") {
+    if (messageId) {
+      const { text, keyboard } = await buildListView(env, chatId);
+      await editMessageText(env.BOT_TOKEN, chatId, messageId, text, keyboard);
+    }
+    await answerCallbackQuery(env.BOT_TOKEN, query.id);
+    return;
+  }
+
   const id = Number(idRaw);
   if (!messageId || !Number.isInteger(id)) {
     await answerCallbackQuery(env.BOT_TOKEN, query.id, "Кнопка застаріла, онови список через /list");
     return;
   }
 
+  if (action === "mgr") {
+    const detail = await buildDetailView(env, chatId, id);
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, detail ? undefined : "Не знайдено");
+    if (detail) await editMessageText(env.BOT_TOKEN, chatId, messageId, detail.text, detail.keyboard);
+    return;
+  }
+
   if (action === "chk") {
     const outcome = await runCheck(env, chatId, id);
     await answerCallbackQuery(env.BOT_TOKEN, query.id, outcome ? "Перевірено ✅" : "Не знайдено");
-    if (outcome) await sendMessage(env.BOT_TOKEN, chatId, outcome.text);
+    if (outcome) {
+      const detail = await buildDetailView(env, chatId, id);
+      if (detail) await editMessageText(env.BOT_TOKEN, chatId, messageId, detail.text, detail.keyboard);
+    }
     return;
   }
 
@@ -622,10 +687,14 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
 
   if (action === "pau" || action === "res") {
     const changed = await setPaused(env, chatId, id, action === "pau");
-    await answerCallbackQuery(env.BOT_TOKEN, query.id, changed ? (action === "pau" ? "⏸ Пауза" : "▶️ Відновлено") : "Не знайдено");
+    await answerCallbackQuery(
+      env.BOT_TOKEN,
+      query.id,
+      changed ? (action === "pau" ? "⏸ Пауза" : "▶️ Відновлено") : "Не знайдено"
+    );
     if (changed) {
-      const { text, keyboard } = await buildListView(env, chatId);
-      await editMessageText(env.BOT_TOKEN, chatId, messageId, text, keyboard);
+      const detail = await buildDetailView(env, chatId, id);
+      if (detail) await editMessageText(env.BOT_TOKEN, chatId, messageId, detail.text, detail.keyboard);
     }
     return;
   }

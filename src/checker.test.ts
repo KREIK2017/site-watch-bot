@@ -21,6 +21,28 @@ describe("extractPrice", () => {
   it("returns null when there is nothing price-shaped", () => {
     expect(extractPrice("В наявності, доставка завтра")).toBeNull();
   });
+
+  it("returns null for an empty string", () => {
+    expect(extractPrice("")).toBeNull();
+  });
+
+  it("returns null for whitespace only", () => {
+    expect(extractPrice("   \n\t  ")).toBeNull();
+  });
+
+  it("returns null for a currency symbol with no digits", () => {
+    expect(extractPrice("Ціна: € — уточнюйте")).toBeNull();
+  });
+
+  it("does not treat an unrelated number (e.g. an order id) as a bare-number price", () => {
+    // The bare-number fallback only fires when the *entire* trimmed input is
+    // just a number — "Order #12345" has surrounding text, so it must not match.
+    expect(extractPrice("Order #12345 confirmed")).toBeNull();
+  });
+
+  it("returns the first match when multiple prices appear in the text", () => {
+    expect(extractPrice("було 100€, стало 80€")).toBe("100€");
+  });
 });
 
 describe("extractStock", () => {
@@ -39,6 +61,26 @@ describe("extractStock", () => {
 
   it("returns null when neither phrase is present", () => {
     expect(extractStock("Ласкаво просимо до нашого магазину")).toBeNull();
+  });
+
+  it("returns null for an empty string", () => {
+    expect(extractStock("")).toBeNull();
+  });
+
+  it("is case-insensitive", () => {
+    expect(extractStock("OUT OF STOCK — CHECK BACK LATER")).toBe("Немає в наявності");
+  });
+
+  it("recognizes a Ukrainian out-of-stock phrase", () => {
+    expect(extractStock("На жаль, немає в наявності")).toBe("Немає в наявності");
+  });
+
+  it("KNOWN LIMITATION: plain substring matching can false-positive on an unrelated phrase", () => {
+    // extractStock uses lower.includes(pattern), not word-boundary matching.
+    // "walking in stockings" contains the literal substring "in stock". This
+    // test pins the current (accepted, low real-world risk) behavior so a
+    // future refactor changes it on purpose, not by accident.
+    expect(extractStock("Ідеально для прогулянок: walking in stockings")).toBe("В наявності");
   });
 });
 
@@ -66,6 +108,26 @@ describe("humanizeStatus", () => {
   it("labels null as unreachable", () => {
     expect(humanizeStatus(null)).toContain("Недоступний");
   });
+
+  it("falls back to a bare label for an out-of-range status (e.g. 0)", () => {
+    // Not null, not in any known HTTP range — a fetch() implementation could
+    // in principle hand back something unusual; must not throw either way.
+    expect(humanizeStatus(0)).toBe("Статус 0");
+  });
+
+  it("falls back to a bare label for a negative status", () => {
+    expect(humanizeStatus(-1)).toBe("Статус -1");
+  });
+
+  it("treats the 199/200 boundary correctly", () => {
+    expect(humanizeStatus(199)).not.toContain("Онлайн");
+    expect(humanizeStatus(200)).toContain("Онлайн");
+  });
+
+  it("treats the 299/300 boundary correctly", () => {
+    expect(humanizeStatus(299)).toContain("Онлайн");
+    expect(humanizeStatus(300)).not.toContain("Онлайн");
+  });
 });
 
 describe("htmlToText", () => {
@@ -80,6 +142,22 @@ describe("htmlToText", () => {
 
   it("collapses whitespace", () => {
     expect(htmlToText("<p>a</p>\n\n   <p>b</p>")).toBe("a b");
+  });
+
+  it("returns an empty string for empty input", () => {
+    expect(htmlToText("")).toBe("");
+  });
+
+  it("returns an empty string for markup with no text at all", () => {
+    expect(htmlToText("<div><span></span><br/></div>")).toBe("");
+  });
+
+  it("does not throw on an unclosed tag", () => {
+    expect(htmlToText("<p>unclosed paragraph")).toBe("unclosed paragraph");
+  });
+
+  it("does not throw on a stray closing tag with no opener", () => {
+    expect(htmlToText("orphan</div> text")).toBe("orphan text");
   });
 });
 
@@ -97,5 +175,13 @@ describe("pickTitle", () => {
 
   it("returns null when both are null", () => {
     expect(pickTitle(null, null)).toBeNull();
+  });
+
+  it("KNOWN LIMITATION: treats an empty string the same as null (falsy check, not null check)", () => {
+    expect(pickTitle("", "Real Title")).toBe("Real Title");
+  });
+
+  it("keeps the first argument on an exact length tie", () => {
+    expect(pickTitle("aaaa", "bbbb")).toBe("aaaa");
   });
 });
