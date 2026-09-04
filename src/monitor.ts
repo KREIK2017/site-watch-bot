@@ -5,6 +5,10 @@ import type { AnalyzeResult, Env, WatchRow } from "./types";
 
 const CONCURRENCY = 8;
 
+function isGoodStatus(status: number | null): boolean {
+  return status !== null && status >= 200 && status < 300;
+}
+
 async function buildChanges(
   env: Env,
   currency: string | null,
@@ -80,8 +84,27 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
     return;
   }
 
+  // Debounce status flips into a *bad* state: a plain 4xx/5xx response isn't
+  // a thrown error, so it flows through here rather than the branch above.
+  // A site that only sometimes serves an anti-bot challenge page would
+  // otherwise report "went down" and "recovered" on every single cron tick.
+  // Recovery (bad → good) is always reported immediately; going bad only
+  // commits once the same status is seen on two consecutive checks.
+  let effectiveStatus = result.status;
+  let newPendingStatus: number | null = null;
+  if (watch.last_status !== null && result.status !== watch.last_status) {
+    if (isGoodStatus(result.status) || !isGoodStatus(watch.last_status)) {
+      effectiveStatus = result.status;
+    } else if (watch.pending_status === result.status) {
+      effectiveStatus = result.status;
+    } else {
+      effectiveStatus = watch.last_status;
+      newPendingStatus = result.status;
+    }
+  }
+
   const currency = await getChatCurrency(env, watch.chat_id);
-  const changes = await buildChanges(env, currency, watch, result);
+  const changes = await buildChanges(env, currency, watch, { ...result, status: effectiveStatus });
   // A brand-new watch (no baseline yet) just gets its baseline stored, no alert.
   if (changes.length > 0 && watch.last_hash !== null) {
     const text = [
@@ -101,6 +124,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
     `UPDATE watches SET
        label = COALESCE(?, label),
        last_status = ?,
+       pending_status = ?,
        last_hash = COALESCE(?, last_hash),
        last_price = COALESCE(?, last_price),
        price_trusted = CASE WHEN ? IS NOT NULL THEN ? ELSE price_trusted END,
@@ -111,7 +135,8 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   )
     .bind(
       result.title,
-      result.status,
+      effectiveStatus,
+      newPendingStatus,
       result.textHash,
       result.price,
       result.price,
