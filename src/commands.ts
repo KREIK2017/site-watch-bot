@@ -1,7 +1,10 @@
-import { analyzeUrl, BOT_USER_AGENT, findPriceCandidates, humanizeStatus } from "./checker";
+import { analyzeUrl, BOT_USER_AGENT, fetchWithTimeout, findPriceCandidates, humanizeStatus } from "./checker";
 import { convertPrice, getChatCurrency, setChatCurrency } from "./currency";
+import { formatHistoryDate, getHistory, recordHistory } from "./history";
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMainMenu, sendMessage, watchLink } from "./telegram";
 import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage, WatchRow } from "./types";
+
+const MAX_WATCHES_PER_CHAT = 20;
 
 const CURRENCY_OPTIONS: { code: string; label: string }[] = [
   { code: "UAH", label: "🇺🇦 UAH" },
@@ -39,6 +42,10 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 /watch &lt;url&gt; — почати стежити
 /list — мої сайти
 /check &lt;id&gt; — перевірити зараз
+/history &lt;id&gt; — історія цін/наявності
+/rename &lt;id&gt; &lt;назва&gt; — перейменувати
+/pause &lt;id&gt; — призупинити перевірки
+/resume &lt;id&gt; — відновити перевірки
 /unwatch &lt;id&gt; — прибрати зі списку
 /currency — обрати валюту показу цін
 /help — ця довідка
@@ -53,12 +60,20 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 // (watchLink) — Telegram opens plain in-message links in its own in-app
 // browser by default, so a separate button for it is redundant and was
 // getting confused with "Видалити" (delete) sitting right next to it.
-function watchButtonsRows(w: { id: number; price: string | null; priceTrusted: boolean }): InlineKeyboardButton[][] {
+function watchButtonsRows(w: {
+  id: number;
+  price: string | null;
+  priceTrusted: boolean;
+  paused: boolean;
+}): InlineKeyboardButton[][] {
   const rows: InlineKeyboardButton[][] = [
     [
       { text: `🔄 Перевірити #${w.id}`, callback_data: `chk:${w.id}` },
       { text: `🗑 Видалити #${w.id}`, callback_data: `unw:${w.id}` },
     ],
+    w.paused
+      ? [{ text: `▶️ Відновити #${w.id}`, callback_data: `res:${w.id}` }]
+      : [{ text: `⏸ Пауза #${w.id}`, callback_data: `pau:${w.id}` }],
   ];
   if (w.price && !w.priceTrusted) {
     rows.push([{ text: `❔ Не та ціна? #${w.id}`, callback_data: `fix:${w.id}` }]);
@@ -93,6 +108,18 @@ function parseWatchArgs(arg: string): { url: string; selector: string | null } |
   return { url, selector };
 }
 
+// Splits "<id> <rest>" for /rename — id must be the first token, the rest
+// (possibly containing spaces) is the new name.
+function parseIdAndText(arg: string): { id: number; text: string } | null {
+  const trimmed = arg.trim();
+  const firstSpace = trimmed.search(/\s/);
+  if (firstSpace === -1) return null;
+  const id = Number(trimmed.slice(0, firstSpace));
+  const text = trimmed.slice(firstSpace + 1).trim();
+  if (!Number.isInteger(id) || !text) return null;
+  return { id, text };
+}
+
 async function handleWatch(env: Env, chatId: number, arg: string): Promise<void> {
   const parsed = parseWatchArgs(arg);
   if (!parsed) {
@@ -112,6 +139,18 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     .first<{ id: number }>();
   if (existing) {
     await sendMessage(env.BOT_TOKEN, chatId, `Вже стежу за цим сайтом (id ${existing.id}).`);
+    return;
+  }
+
+  const { count } = (await env.DB.prepare("SELECT COUNT(*) AS count FROM watches WHERE chat_id = ? AND active = 1")
+    .bind(chatId)
+    .first<{ count: number }>()) ?? { count: 0 };
+  if (count >= MAX_WATCHES_PER_CHAT) {
+    await sendMessage(
+      env.BOT_TOKEN,
+      chatId,
+      `Досягнуто ліміту ${MAX_WATCHES_PER_CHAT} сайтів на чат. Прибери щось непотрібне через /list, щоб додати нове.`
+    );
     return;
   }
 
@@ -135,6 +174,10 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     )
     .first<{ id: number }>();
 
+  if (inserted && (baseline.price || baseline.stock)) {
+    await recordHistory(env, inserted.id, baseline.price, baseline.stock, baseline.status);
+  }
+
   const lines = [`✅ Стежу за <b>${watchLink(url, baseline.title)}</b> (id ${inserted?.id})`];
   const selectorLine = describeSelector(selector);
   if (selectorLine) lines.push(selectorLine);
@@ -153,14 +196,23 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     }
   }
   const keyboard = inserted
-    ? watchButtonsRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted })
+    ? watchButtonsRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted, paused: false })
     : undefined;
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
 
 type ListRow = Pick<
   WatchRow,
-  "id" | "url" | "label" | "selector" | "last_status" | "last_price" | "price_trusted" | "last_stock" | "last_value"
+  | "id"
+  | "url"
+  | "label"
+  | "selector"
+  | "last_status"
+  | "last_price"
+  | "price_trusted"
+  | "last_stock"
+  | "last_value"
+  | "paused"
 >;
 
 async function buildListView(
@@ -168,7 +220,7 @@ async function buildListView(
   chatId: number
 ): Promise<{ text: string; keyboard: InlineKeyboardButton[][] }> {
   const { results } = await env.DB.prepare(
-    "SELECT id, url, label, selector, last_status, last_price, price_trusted, last_stock, last_value FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
+    "SELECT id, url, label, selector, last_status, last_price, price_trusted, last_stock, last_value, paused FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
   )
     .bind(chatId)
     .all<ListRow>();
@@ -180,7 +232,9 @@ async function buildListView(
   const currency = await getChatCurrency(env, chatId);
   const lines = await Promise.all(
     results.map(async (w) => {
-      const parts = [`#${w.id} ${watchLink(w.url, w.label)}`, humanizeStatus(w.last_status)];
+      const parts = [`#${w.id} ${watchLink(w.url, w.label)}`];
+      if (w.paused) parts.push("⏸ на паузі");
+      else parts.push(humanizeStatus(w.last_status));
       const priceDisplay = await convertPrice(env, w.last_price, currency);
       if (priceDisplay) parts.push(`ціна ${escapeHtml(priceDisplay)}`);
       if (w.last_stock) parts.push(escapeHtml(w.last_stock));
@@ -193,7 +247,12 @@ async function buildListView(
   return {
     text: lines.join("\n"),
     keyboard: results.flatMap((w) =>
-      watchButtonsRows({ id: w.id, price: w.last_price, priceTrusted: Boolean(w.price_trusted) })
+      watchButtonsRows({
+        id: w.id,
+        price: w.last_price,
+        priceTrusted: Boolean(w.price_trusted),
+        paused: Boolean(w.paused),
+      })
     ),
   };
 }
@@ -220,6 +279,85 @@ async function handleUnwatch(env: Env, chatId: number, arg: string): Promise<voi
     chatId,
     changed > 0 ? `Прибрав id ${id} зі списку.` : `Не знайшов активний watch з id ${id}.`
   );
+}
+
+async function handleRename(env: Env, chatId: number, arg: string): Promise<void> {
+  const parsed = parseIdAndText(arg);
+  if (!parsed) {
+    await sendMessage(env.BOT_TOKEN, chatId, "Формат: <code>/rename 3 Нова назва</code>");
+    return;
+  }
+  const result = await env.DB.prepare("UPDATE watches SET label = ? WHERE id = ? AND chat_id = ? AND active = 1")
+    .bind(parsed.text, parsed.id, chatId)
+    .run();
+  const changed = result.meta.changes ?? 0;
+  await sendMessage(
+    env.BOT_TOKEN,
+    chatId,
+    changed > 0 ? `Перейменовано id ${parsed.id} на «${parsed.text}».` : `Не знайшов активний watch з id ${parsed.id}.`
+  );
+}
+
+async function setPaused(env: Env, chatId: number, id: number, paused: boolean): Promise<boolean> {
+  const result = await env.DB.prepare(
+    "UPDATE watches SET paused = ? WHERE id = ? AND chat_id = ? AND active = 1"
+  )
+    .bind(paused ? 1 : 0, id, chatId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+async function handlePauseCommand(env: Env, chatId: number, arg: string, paused: boolean): Promise<void> {
+  const id = Number(arg.trim());
+  const usage = paused ? "/pause 3" : "/resume 3";
+  if (!Number.isInteger(id)) {
+    await sendMessage(env.BOT_TOKEN, chatId, `Вкажи id зі списку: <code>${usage}</code>`);
+    return;
+  }
+  const changed = await setPaused(env, chatId, id, paused);
+  await sendMessage(
+    env.BOT_TOKEN,
+    chatId,
+    changed
+      ? paused
+        ? `⏸ Призупинив перевірки для id ${id}.`
+        : `▶️ Відновив перевірки для id ${id}.`
+      : `Не знайшов активний watch з id ${id}.`
+  );
+}
+
+async function handleHistory(env: Env, chatId: number, arg: string): Promise<void> {
+  const id = Number(arg.trim());
+  if (!Number.isInteger(id)) {
+    await sendMessage(env.BOT_TOKEN, chatId, "Вкажи id зі списку: <code>/history 3</code>");
+    return;
+  }
+  const watch = await env.DB.prepare("SELECT * FROM watches WHERE id = ? AND chat_id = ?")
+    .bind(id, chatId)
+    .first<WatchRow>();
+  if (!watch) {
+    await sendMessage(env.BOT_TOKEN, chatId, `Не знайшов watch з id ${id}.`);
+    return;
+  }
+
+  const entries = await getHistory(env, id);
+  if (!entries.length) {
+    await sendMessage(env.BOT_TOKEN, chatId, "Історії ще немає — зачекай на першу зафіксовану зміну.");
+    return;
+  }
+
+  const currency = await getChatCurrency(env, chatId);
+  const lines = await Promise.all(
+    entries.map(async (entry) => {
+      const parts = [formatHistoryDate(entry.checked_at)];
+      const priceDisplay = await convertPrice(env, entry.price, currency);
+      if (priceDisplay) parts.push(escapeHtml(priceDisplay));
+      if (entry.stock) parts.push(escapeHtml(entry.stock));
+      return parts.join(" — ");
+    })
+  );
+
+  await sendMessage(env.BOT_TOKEN, chatId, `<b>${watchLink(watch.url, watch.label)}</b>\n\n${lines.join("\n")}`);
 }
 
 async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: string; watch: WatchRow } | null> {
@@ -257,6 +395,13 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
       id
     )
     .run();
+
+  const isBaseline = watch.last_hash === null;
+  const priceChanged = Boolean(result.price) && result.price !== watch.last_price;
+  const stockChanged = Boolean(result.stock) && result.stock !== watch.last_stock;
+  if (isBaseline || priceChanged || stockChanged) {
+    await recordHistory(env, id, result.price ?? watch.last_price, result.stock ?? watch.last_stock, result.status);
+  }
 
   const lines = [`<b>${watchLink(watch.url, watch.label ?? result.title)}</b>`];
   const selectorLine = describeSelector(watch.selector);
@@ -352,6 +497,18 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
     case "/check":
       await handleCheck(env, chatId, arg);
       break;
+    case "/history":
+      await handleHistory(env, chatId, arg);
+      break;
+    case "/rename":
+      await handleRename(env, chatId, arg);
+      break;
+    case "/pause":
+      await handlePauseCommand(env, chatId, arg, true);
+      break;
+    case "/resume":
+      await handlePauseCommand(env, chatId, arg, false);
+      break;
     case "/currency":
       await sendMessage(env.BOT_TOKEN, chatId, "В якій валюті показувати ціни?", currencyKeyboard());
       break;
@@ -371,7 +528,7 @@ async function handleFixButton(env: Env, chatId: number, queryId: string, id: nu
 
   let candidates: Awaited<ReturnType<typeof findPriceCandidates>> = [];
   try {
-    const res = await fetch(watch.url, { redirect: "follow", headers: { "user-agent": BOT_USER_AGENT } });
+    const res = await fetchWithTimeout(watch.url, { redirect: "follow", headers: { "user-agent": BOT_USER_AGENT } });
     candidates = await findPriceCandidates(res);
   } catch {
     // fall through with an empty list, handled below
@@ -457,6 +614,16 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
     const changed = result.meta.changes ?? 0;
     await answerCallbackQuery(env.BOT_TOKEN, query.id, changed > 0 ? "Прибрано" : "Не знайдено");
     if (changed > 0) {
+      const { text, keyboard } = await buildListView(env, chatId);
+      await editMessageText(env.BOT_TOKEN, chatId, messageId, text, keyboard);
+    }
+    return;
+  }
+
+  if (action === "pau" || action === "res") {
+    const changed = await setPaused(env, chatId, id, action === "pau");
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, changed ? (action === "pau" ? "⏸ Пауза" : "▶️ Відновлено") : "Не знайдено");
+    if (changed) {
       const { text, keyboard } = await buildListView(env, chatId);
       await editMessageText(env.BOT_TOKEN, chatId, messageId, text, keyboard);
     }

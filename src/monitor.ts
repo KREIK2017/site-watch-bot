@@ -1,6 +1,7 @@
 import { summarizeChange } from "./ai";
 import { analyzeUrl, humanizeStatus } from "./checker";
 import { convertPrice, getChatCurrency } from "./currency";
+import { recordHistory } from "./history";
 import { escapeHtml, sendMessage, watchLink } from "./telegram";
 import type { AnalyzeResult, Env, WatchRow } from "./types";
 
@@ -106,6 +107,19 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
     }
   }
 
+  const isBaseline = watch.last_hash === null;
+  const priceChanged = Boolean(result.price) && result.price !== watch.last_price;
+  const stockChanged = Boolean(result.stock) && result.stock !== watch.last_stock;
+  if (isBaseline || priceChanged || stockChanged) {
+    await recordHistory(
+      env,
+      watch.id,
+      result.price ?? watch.last_price,
+      result.stock ?? watch.last_stock,
+      effectiveStatus
+    );
+  }
+
   const currency = await getChatCurrency(env, watch.chat_id);
   const changes = await buildChanges(env, currency, watch, { ...result, status: effectiveStatus });
   // A brand-new watch (no baseline yet) just gets its baseline stored, no alert.
@@ -154,7 +168,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
 }
 
 export async function runAllChecks(env: Env): Promise<void> {
-  const { results } = await env.DB.prepare("SELECT * FROM watches WHERE active = 1").all<WatchRow>();
+  const { results } = await env.DB.prepare("SELECT * FROM watches WHERE active = 1 AND paused = 0").all<WatchRow>();
 
   for (let i = 0; i < results.length; i += CONCURRENCY) {
     const batch = results.slice(i, i + CONCURRENCY);

@@ -50,6 +50,7 @@ export interface WatchRow {
   last_stock: string | null;
   last_value: string | null;
   last_content: string | null;
+  paused: number;
   created_at: string;
   last_checked_at: string | null;
   active: number;

@@ -12,11 +12,13 @@
     "secrets:bot-token": "wrangler secret put BOT_TOKEN",
     "secrets:webhook-secret": "wrangler secret put WEBHOOK_SECRET",
     "secrets:anthropic-key": "wrangler secret put ANTHROPIC_API_KEY",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260831.1",
     "typescript": "^5.6.3",
+    "vitest": "^5.0.0",
     "wrangler": "^4.128.0"
   },
   "dependencies": {

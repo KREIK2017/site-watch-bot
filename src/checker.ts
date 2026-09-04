@@ -22,9 +22,11 @@ const IN_STOCK_PATTERNS = [
   "в наличии",
 ];
 
-// One dollar/euro/pound/hryvnia sign (or 3-letter code) glued to a number, in either order.
+// One dollar/euro/pound/hryvnia sign (or 3-letter code) glued to a number, in
+// either order. Keep this code list in sync with currency.ts's KNOWN_CODES —
+// a price extracted here but unrecognized there can't be converted.
 const PRICE_RE =
-  /(?:[$€£₴¥]\s?\d[\d\s.,]{0,12}\d|\d[\d\s.,]{0,12}\d\s?(?:USD|EUR|UAH|GBP|\$|€|£|₴))/i;
+  /(?:[$€£₴¥]\s?\d[\d\s.,]{0,12}\d|\d[\d\s.,]{0,12}\d\s?(?:USD|EUR|UAH|GBP|PLN|BGN|CZK|CHF|CAD|AUD|JPY|\$|€|£|₴))/i;
 
 function decodeEntities(s: string): string {
   return s
@@ -162,7 +164,7 @@ function extractStructuredData(html: string): { title: string | null; price: str
 // a deliberately generic og:title for social-share cards while the real,
 // specific product name only lives in <title> — prefer whichever is longer
 // rather than trusting og:title/JSON-LD unconditionally.
-function pickTitle(a: string | null, b: string | null): string | null {
+export function pickTitle(a: string | null, b: string | null): string | null {
   if (!a) return b;
   if (!b) return a;
   return b.length > a.length ? b : a;
@@ -313,6 +315,20 @@ export async function findPriceCandidates(response: Response): Promise<PriceCand
 
 export const BOT_USER_AGENT = "Mozilla/5.0 (compatible; SiteWatchBot/1.0)";
 
+const FETCH_TIMEOUT_MS = 15000;
+
+// A hung/very slow site would otherwise tie up its whole cron batch until
+// Cloudflare's own subrequest ceiling kicks in — bound it explicitly instead.
+export async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const STEAM_APP_RE = /store\.steampowered\.com\/app\/(\d+)/i;
 
 interface SteamPriceOverview {
@@ -343,7 +359,7 @@ async function fetchSteamData(env: Env, appId: string): Promise<SteamAppData | n
   }
 
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=ua&l=ukrainian`,
       { headers: { "user-agent": BOT_USER_AGENT } }
     );
@@ -422,7 +438,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
   }
 
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       redirect: "follow",
       headers: { "user-agent": BOT_USER_AGENT },
     });
@@ -496,9 +512,12 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
     // the message, which is both unreadable and can badly overflow a
     // Telegram message; a fetch failure can in general say anything, so cap
     // every message defensively rather than trusting it to stay short.
-    const message = /too many redirect/i.test(rawMessage)
-      ? "Забагато перенаправлень — сайт зациклився на редиректах"
-      : truncate(rawMessage, 200);
+    const message =
+      err instanceof Error && err.name === "AbortError"
+        ? "Сайт не відповів за 15 секунд (тайм-аут)"
+        : /too many redirect/i.test(rawMessage)
+          ? "Забагато перенаправлень — сайт зациклився на редиректах"
+          : truncate(rawMessage, 200);
     return {
       status: null,
       sslOk,
