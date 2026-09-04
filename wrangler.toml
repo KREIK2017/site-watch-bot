@@ -15,5 +15,7 @@ database_name = "site-watch-bot-db"
 database_id = "e5a07d7e-3cdb-43d1-96ca-490333733734"
 
 # Secrets (set via `wrangler secret put`, never committed):
-#   BOT_TOKEN        - Telegram bot token from @BotFather
-#   WEBHOOK_SECRET   - random string, must match the secret_token used in setWebhook
+#   BOT_TOKEN          - Telegram bot token from @BotFather
+#   WEBHOOK_SECRET     - random string, must match the secret_token used in setWebhook
+#   ANTHROPIC_API_KEY  - optional; powers the AI change-summary feature (see README).
+#                        Without it, watches fall back to a plain "content changed" line.

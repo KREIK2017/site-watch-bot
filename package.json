@@ -11,11 +11,15 @@
     "db:migrate:remote": "wrangler d1 migrations apply site-watch-bot-db --remote",
     "secrets:bot-token": "wrangler secret put BOT_TOKEN",
     "secrets:webhook-secret": "wrangler secret put WEBHOOK_SECRET",
+    "secrets:anthropic-key": "wrangler secret put ANTHROPIC_API_KEY",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260831.1",
     "typescript": "^5.6.3",
     "wrangler": "^4.128.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.123.0"
   }
 }

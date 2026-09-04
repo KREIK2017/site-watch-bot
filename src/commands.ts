@@ -117,8 +117,8 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
 
   const baseline = await analyzeUrl(env, url, selector);
   const inserted = await env.DB.prepare(
-    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_value, last_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
+    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_value, last_content, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
   )
     .bind(
       chatId,
@@ -130,7 +130,8 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
       baseline.price,
       baseline.priceTrusted ? 1 : 0,
       baseline.stock,
-      baseline.value
+      baseline.value,
+      baseline.content
     )
     .first<{ id: number }>();
 
@@ -239,6 +240,7 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
        price_trusted = CASE WHEN ? IS NOT NULL THEN ? ELSE price_trusted END,
        last_stock = COALESCE(?, last_stock),
        last_value = COALESCE(?, last_value),
+       last_content = COALESCE(?, last_content),
        last_checked_at = datetime('now')
      WHERE id = ?`
   )
@@ -251,6 +253,7 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
       result.priceTrusted ? 1 : 0,
       result.stock,
       result.value,
+      result.content,
       id
     )
     .run();

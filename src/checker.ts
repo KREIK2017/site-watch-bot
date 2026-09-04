@@ -389,6 +389,7 @@ async function analyzeSteam(env: Env, appId: string): Promise<AnalyzeResult | nu
       title,
       textHash: await sha256(JSON.stringify({ price: data.price_overview, isFree: data.is_free })),
       value: null,
+      content: null,
       price,
       priceTrusted: true,
       stock,
@@ -412,6 +413,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       title: null,
       textHash: null,
       value: null,
+      content: null,
       price: null,
       priceTrusted: false,
       stock: null,
@@ -441,6 +443,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
           title,
           textHash: null,
           value: null,
+          content: null,
           price: null,
           priceTrusted: false,
           stock: null,
@@ -457,6 +460,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
         // still show and diff a meaningful "was X, now Y" instead of just
         // "content changed" when it isn't shaped like a price at all.
         value: text,
+        content: null,
         price: extractPrice(text),
         priceTrusted: true,
         stock: extractStock(text),
@@ -477,6 +481,10 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       // page having changed, even though nothing actually did.
       textHash: ok ? await sha256(text) : null,
       value: null,
+      // Feeds the AI change-summary feature (only meaningful for watches
+      // that never show a price/stock — see the isCommercePage gate in
+      // monitor.ts). Capped well short of a prompt-worrying size.
+      content: ok ? truncate(text, 4000) : null,
       price: ok ? structured.price ?? extractPrice(text) : null,
       priceTrusted: Boolean(structured.price),
       stock: ok ? structured.stock ?? extractStock(text) : null,
@@ -497,6 +505,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       title: null,
       textHash: null,
       value: null,
+      content: null,
       price: null,
       priceTrusted: false,
       stock: null,

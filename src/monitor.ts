@@ -1,3 +1,4 @@
+import { summarizeChange } from "./ai";
 import { analyzeUrl, humanizeStatus } from "./checker";
 import { convertPrice, getChatCurrency } from "./currency";
 import { escapeHtml, sendMessage, watchLink } from "./telegram";
@@ -58,7 +59,9 @@ async function buildChanges(
     next.textHash &&
     prev.last_hash !== next.textHash
   ) {
-    changes.push("• Вміст сторінки змінився");
+    const summary =
+      prev.last_content && next.content ? await summarizeChange(env, prev.last_content, next.content) : null;
+    changes.push(summary ? `• ${summary}` : "• Вміст сторінки змінився");
   }
 
   return changes;
@@ -130,6 +133,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
        price_trusted = CASE WHEN ? IS NOT NULL THEN ? ELSE price_trusted END,
        last_stock = COALESCE(?, last_stock),
        last_value = COALESCE(?, last_value),
+       last_content = COALESCE(?, last_content),
        last_checked_at = datetime('now')
      WHERE id = ?`
   )
@@ -143,6 +147,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       result.priceTrusted ? 1 : 0,
       result.stock,
       result.value,
+      result.content,
       watch.id
     )
     .run();

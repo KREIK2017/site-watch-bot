@@ -2,6 +2,9 @@ export interface Env {
   DB: D1Database;
   BOT_TOKEN: string;
   WEBHOOK_SECRET: string;
+  // Optional: powers the AI change-summary feature. Without it, watches just
+  // fall back to the plain "Вміст сторінки змінився" line.
+  ANTHROPIC_API_KEY?: string;
 }
 
 export interface TelegramChat {
@@ -46,6 +49,7 @@ export interface WatchRow {
   price_trusted: number;
   last_stock: string | null;
   last_value: string | null;
+  last_content: string | null;
   created_at: string;
   last_checked_at: string | null;
   active: number;
@@ -57,6 +61,9 @@ export interface AnalyzeResult {
   title: string | null;
   textHash: string | null;
   value: string | null;
+  // Truncated whole-page text, kept only for no-selector watches that have
+  // never shown a price/stock — feeds the AI change-summary feature.
+  content: string | null;
   price: string | null;
   priceTrusted: boolean;
   stock: string | null;
