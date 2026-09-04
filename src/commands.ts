@@ -228,14 +228,25 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
   if (!watch) return null;
 
   const result = await analyzeUrl(env, watch.url, watch.selector);
+  // A blocked/challenged check returns nulls for hash/price/stock; COALESCE
+  // keeps the last known-good values instead of wiping them out.
   await env.DB.prepare(
-    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_value = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET
+       label = COALESCE(?, label),
+       last_status = ?,
+       last_hash = COALESCE(?, last_hash),
+       last_price = COALESCE(?, last_price),
+       price_trusted = CASE WHEN ? IS NOT NULL THEN ? ELSE price_trusted END,
+       last_stock = COALESCE(?, last_stock),
+       last_value = COALESCE(?, last_value),
+       last_checked_at = datetime('now')
      WHERE id = ?`
   )
     .bind(
       result.title,
       result.status,
       result.textHash,
+      result.price,
       result.price,
       result.priceTrusted ? 1 : 0,
       result.stock,

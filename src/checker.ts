@@ -461,7 +461,11 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       status,
       sslOk: true,
       title: title ? truncate(title, 120) : null,
-      textHash: await sha256(text),
+      // A non-2xx body (a Cloudflare/anti-bot challenge page, a WAF block
+      // page...) isn't real content — hashing it would compare "real page"
+      // against "challenge page" on the next flip and misreport that as the
+      // page having changed, even though nothing actually did.
+      textHash: ok ? await sha256(text) : null,
       value: null,
       price: ok ? structured.price ?? extractPrice(text) : null,
       priceTrusted: Boolean(structured.price),

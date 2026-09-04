@@ -39,10 +39,17 @@ async function buildChanges(
   ) {
     changes.push(`• Значення: ${escapeHtml(prev.last_value)} → ${escapeHtml(next.value)}`);
   }
-  // Only flag a generic content change when nothing more specific changed,
-  // otherwise every price/stock update would also print a redundant line.
+  // Only flag a generic whole-page content change on watches that have never
+  // shown a price/stock at all (a plain "watch this page" case). Once a page
+  // is known to be a commerce page, its full-text hash is too noisy to alert
+  // on directly — ads, "recently viewed", view counters and the like change
+  // on their own, and a site that intermittently returns an anti-bot
+  // challenge page instead of the real one would otherwise look like its
+  // content keeps "changing" every time it flips between the two.
+  const isCommercePage = prev.last_price || next.price || prev.last_stock || next.stock;
   if (
     changes.length === 0 &&
+    !isCommercePage &&
     prev.last_hash &&
     next.textHash &&
     prev.last_hash !== next.textHash
@@ -87,14 +94,26 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
     await sendMessage(env.BOT_TOKEN, watch.chat_id, text);
   }
 
+  // A blocked/challenged check returns nulls for hash/price/stock; COALESCE
+  // keeps the last known-good values instead of wiping them out, so a
+  // transient block doesn't erase what we actually know about the page.
   await env.DB.prepare(
-    `UPDATE watches SET label = COALESCE(?, label), last_status = ?, last_hash = ?, last_price = ?, price_trusted = ?, last_stock = ?, last_value = ?, last_checked_at = datetime('now')
+    `UPDATE watches SET
+       label = COALESCE(?, label),
+       last_status = ?,
+       last_hash = COALESCE(?, last_hash),
+       last_price = COALESCE(?, last_price),
+       price_trusted = CASE WHEN ? IS NOT NULL THEN ? ELSE price_trusted END,
+       last_stock = COALESCE(?, last_stock),
+       last_value = COALESCE(?, last_value),
+       last_checked_at = datetime('now')
      WHERE id = ?`
   )
     .bind(
       result.title,
       result.status,
       result.textHash,
+      result.price,
       result.price,
       result.priceTrusted ? 1 : 0,
       result.stock,
