@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { extractPrice, extractStock, htmlToText, humanizeStatus, pickTitle } from "./checker";
+import {
+  detectHosting,
+  detectPlatform,
+  detectSecurityHeaders,
+  extractPrice,
+  extractStock,
+  htmlToText,
+  humanizeStatus,
+  pickTitle,
+} from "./checker";
 
 describe("extractPrice", () => {
   it("finds a currency symbol glued to a number", () => {
@@ -183,5 +192,64 @@ describe("pickTitle", () => {
 
   it("keeps the first argument on an exact length tie", () => {
     expect(pickTitle("aaaa", "bbbb")).toBe("aaaa");
+  });
+});
+
+describe("detectPlatform", () => {
+  it("recognizes WordPress from an asset path signature", () => {
+    expect(detectPlatform('<link rel="stylesheet" href="/wp-content/themes/x/style.css">')).toBe("WordPress");
+  });
+
+  it("recognizes a platform from the generator meta tag", () => {
+    expect(detectPlatform('<meta name="generator" content="WordPress 6.4">')).toBe("WordPress");
+  });
+
+  it("returns null for a plain page with no known signature", () => {
+    expect(detectPlatform("<html><body><h1>Hello</h1></body></html>")).toBeNull();
+  });
+
+  it("returns null for empty input", () => {
+    expect(detectPlatform("")).toBeNull();
+  });
+});
+
+describe("detectHosting", () => {
+  it("recognizes Cloudflare from the Server header", () => {
+    expect(detectHosting(new Headers({ server: "cloudflare" }))).toBe("Cloudflare");
+  });
+
+  it("recognizes Vercel from its id header even without a Server header", () => {
+    expect(detectHosting(new Headers({ "x-vercel-id": "abc123" }))).toBe("Vercel");
+  });
+
+  it("recognizes nginx", () => {
+    expect(detectHosting(new Headers({ server: "nginx/1.24.0" }))).toBe("nginx");
+  });
+
+  it("returns null when there is no recognizable Server header", () => {
+    expect(detectHosting(new Headers())).toBeNull();
+  });
+
+  it("returns null for an unrecognized Server header value", () => {
+    expect(detectHosting(new Headers({ server: "MyCustomServer/1.0" }))).toBeNull();
+  });
+});
+
+describe("detectSecurityHeaders", () => {
+  it("lists every recognized security header present", () => {
+    const headers = new Headers({
+      "strict-transport-security": "max-age=63072000",
+      "content-security-policy": "default-src 'self'",
+      "x-frame-options": "DENY",
+    });
+    expect(detectSecurityHeaders(headers)).toBe("HSTS, CSP, X-Frame-Options");
+  });
+
+  it("lists only the headers actually present", () => {
+    expect(detectSecurityHeaders(new Headers({ "x-frame-options": "SAMEORIGIN" }))).toBe("X-Frame-Options");
+  });
+
+  it("returns null when none of the recognized headers are present", () => {
+    expect(detectSecurityHeaders(new Headers({ "content-type": "text/html" }))).toBeNull();
   });
 });

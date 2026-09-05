@@ -50,6 +50,11 @@ export interface WatchRow {
   last_stock: string | null;
   last_value: string | null;
   last_content: string | null;
+  last_response_ms: number | null;
+  last_page_size: number | null;
+  last_platform: string | null;
+  last_hosting: string | null;
+  last_security_headers: string | null;
   paused: number;
   created_at: string;
   last_checked_at: string | null;
@@ -68,5 +73,13 @@ export interface AnalyzeResult {
   price: string | null;
   priceTrusted: boolean;
   stock: string | null;
+  // Facts about the site itself, not any product on it — shown for every
+  // watch. Only populated on a successful (2xx) no-selector fetch; null
+  // everywhere else (selector watches still get responseMs).
+  responseMs: number | null;
+  pageSizeBytes: number | null;
+  platform: string | null;
+  hosting: string | null;
+  securityHeaders: string | null;
   error?: string;
 }

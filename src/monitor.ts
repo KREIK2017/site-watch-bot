@@ -148,6 +148,11 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
        last_stock = COALESCE(?, last_stock),
        last_value = COALESCE(?, last_value),
        last_content = COALESCE(?, last_content),
+       last_response_ms = COALESCE(?, last_response_ms),
+       last_page_size = COALESCE(?, last_page_size),
+       last_platform = COALESCE(?, last_platform),
+       last_hosting = COALESCE(?, last_hosting),
+       last_security_headers = COALESCE(?, last_security_headers),
        last_checked_at = datetime('now')
      WHERE id = ?`
   )
@@ -162,6 +167,11 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       result.stock,
       result.value,
       result.content,
+      result.responseMs,
+      result.pageSizeBytes,
+      result.platform,
+      result.hosting,
+      result.securityHeaders,
       watch.id
     )
     .run();

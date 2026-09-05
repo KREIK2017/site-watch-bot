@@ -6,6 +6,29 @@ import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage,
 
 const MAX_WATCHES_PER_CHAT = 20;
 
+function formatResponseTime(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)} с` : `${ms} мс`;
+}
+
+function formatPageSize(bytes: number): string {
+  return bytes >= 1024 ? `${(bytes / 1024).toFixed(0)} KB` : `${bytes} B`;
+}
+
+// Facts about the site itself (not any product on it) — response time and
+// page size are available for every watch; platform/hosting/security
+// headers only for a plain (no-selector) page fetch.
+function buildSiteInfoLines(
+  w: Pick<WatchRow, "last_response_ms" | "last_page_size" | "last_platform" | "last_hosting" | "last_security_headers">
+): string[] {
+  const lines: string[] = [];
+  if (w.last_response_ms !== null) lines.push(`⏱ Відповідь: ${formatResponseTime(w.last_response_ms)}`);
+  if (w.last_page_size !== null) lines.push(`📦 Розмір сторінки: ${formatPageSize(w.last_page_size)}`);
+  if (w.last_platform) lines.push(`🧩 Платформа: ${escapeHtml(w.last_platform)}`);
+  if (w.last_hosting) lines.push(`☁️ Хостинг/CDN: ${escapeHtml(w.last_hosting)}`);
+  if (w.last_security_headers) lines.push(`🔒 Заголовки безпеки: ${escapeHtml(w.last_security_headers)}`);
+  return lines;
+}
+
 const CURRENCY_OPTIONS: { code: string; label: string }[] = [
   { code: "UAH", label: "🇺🇦 UAH" },
   { code: "USD", label: "🇺🇸 USD" },
@@ -174,8 +197,8 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
 
   const baseline = await analyzeUrl(env, url, selector);
   const inserted = await env.DB.prepare(
-    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_value, last_content, last_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
+    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_value, last_content, last_response_ms, last_page_size, last_platform, last_hosting, last_security_headers, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
   )
     .bind(
       chatId,
@@ -188,7 +211,12 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
       baseline.priceTrusted ? 1 : 0,
       baseline.stock,
       baseline.value,
-      baseline.content
+      baseline.content,
+      baseline.responseMs,
+      baseline.pageSizeBytes,
+      baseline.platform,
+      baseline.hosting,
+      baseline.securityHeaders
     )
     .first<{ id: number }>();
 
@@ -212,6 +240,14 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     if (!baseline.price && !baseline.stock && baseline.value) {
       lines.push(`Значення: ${escapeHtml(baseline.value)}`);
     }
+    const siteInfo = buildSiteInfoLines({
+      last_response_ms: baseline.responseMs,
+      last_page_size: baseline.pageSizeBytes,
+      last_platform: baseline.platform,
+      last_hosting: baseline.hosting,
+      last_security_headers: baseline.securityHeaders,
+    });
+    if (siteInfo.length) lines.push("", "🔧 <b>Технічна інформація</b>", ...siteInfo);
   }
   const keyboard = inserted
     ? actionRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted, paused: false })
@@ -298,6 +334,8 @@ async function buildDetailView(
   if (!watch.last_price && !watch.last_stock && watch.last_value) {
     lines.push(`Значення: ${escapeHtml(watch.last_value)}`);
   }
+  const siteInfo = buildSiteInfoLines(watch);
+  if (siteInfo.length) lines.push("", "🔧 <b>Технічна інформація</b>", ...siteInfo);
 
   return {
     text: lines.join("\n"),
@@ -425,6 +463,11 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
        last_stock = COALESCE(?, last_stock),
        last_value = COALESCE(?, last_value),
        last_content = COALESCE(?, last_content),
+       last_response_ms = COALESCE(?, last_response_ms),
+       last_page_size = COALESCE(?, last_page_size),
+       last_platform = COALESCE(?, last_platform),
+       last_hosting = COALESCE(?, last_hosting),
+       last_security_headers = COALESCE(?, last_security_headers),
        last_checked_at = datetime('now')
      WHERE id = ?`
   )
@@ -438,6 +481,11 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
       result.stock,
       result.value,
       result.content,
+      result.responseMs,
+      result.pageSizeBytes,
+      result.platform,
+      result.hosting,
+      result.securityHeaders,
       id
     )
     .run();
@@ -465,6 +513,14 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
     if (!result.price && !result.stock && result.value) {
       lines.push(`Значення: ${escapeHtml(result.value)}`);
     }
+    const siteInfo = buildSiteInfoLines({
+      last_response_ms: result.responseMs,
+      last_page_size: result.pageSizeBytes,
+      last_platform: result.platform,
+      last_hosting: result.hosting,
+      last_security_headers: result.securityHeaders,
+    });
+    if (siteInfo.length) lines.push("", "🔧 <b>Технічна інформація</b>", ...siteInfo);
   }
   return { text: lines.join("\n"), watch };
 }

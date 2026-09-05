@@ -175,6 +175,50 @@ function extractTitle(html: string): string | null {
   return raw ? truncate(raw, 120) : null;
 }
 
+// Best-effort CMS/framework fingerprinting for the "site info" block shown on
+// plain (non-commerce) watches — a generator meta tag when the site bothers
+// to keep one, else a handful of well-known asset-path/script signatures.
+const PLATFORM_SIGNATURES: { pattern: RegExp; name: string }[] = [
+  { pattern: /wp-content|wp-includes|wp-json/i, name: "WordPress" },
+  { pattern: /cdn\.shopify\.com|Shopify\.theme/i, name: "Shopify" },
+  { pattern: /static\.wixstatic\.com/i, name: "Wix" },
+  { pattern: /static1\.squarespace\.com/i, name: "Squarespace" },
+  { pattern: /__NEXT_DATA__/i, name: "Next.js" },
+  { pattern: /assets-global\.website-files\.com/i, name: "Webflow" },
+  { pattern: /Drupal\.settings|\/sites\/default\/files/i, name: "Drupal" },
+];
+
+export function detectPlatform(html: string): string | null {
+  const generatorMatch = html.match(/<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)["']/i);
+  if (generatorMatch) {
+    const known = ["WordPress", "Joomla", "Drupal", "Wix", "Shopify", "Squarespace", "Webflow", "Ghost"];
+    const found = known.find((k) => generatorMatch[1].toLowerCase().includes(k.toLowerCase()));
+    if (found) return found;
+  }
+  return PLATFORM_SIGNATURES.find((sig) => sig.pattern.test(html))?.name ?? null;
+}
+
+export function detectHosting(headers: Headers): string | null {
+  const server = (headers.get("server") ?? "").toLowerCase();
+  if (server.includes("cloudflare")) return "Cloudflare";
+  if (server.includes("netlify")) return "Netlify";
+  if (headers.get("x-vercel-id") !== null) return "Vercel";
+  if (server.includes("github.com")) return "GitHub Pages";
+  if (server.includes("nginx")) return "nginx";
+  if (server.includes("apache")) return "Apache";
+  if (server.includes("litespeed")) return "LiteSpeed";
+  if (server.includes("microsoft-iis")) return "IIS";
+  return null;
+}
+
+export function detectSecurityHeaders(headers: Headers): string | null {
+  const found: string[] = [];
+  if (headers.get("strict-transport-security")) found.push("HSTS");
+  if (headers.get("content-security-policy")) found.push("CSP");
+  if (headers.get("x-frame-options")) found.push("X-Frame-Options");
+  return found.length ? found.join(", ") : null;
+}
+
 export async function sha256(text: string): Promise<string> {
   const data = new TextEncoder().encode(text);
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -409,6 +453,11 @@ async function analyzeSteam(env: Env, appId: string): Promise<AnalyzeResult | nu
       price,
       priceTrusted: true,
       stock,
+      responseMs: null,
+      pageSizeBytes: null,
+      platform: null,
+      hosting: null,
+      securityHeaders: null,
     };
   } catch {
     return null;
@@ -433,15 +482,22 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       price: null,
       priceTrusted: false,
       stock: null,
+      responseMs: null,
+      pageSizeBytes: null,
+      platform: null,
+      hosting: null,
+      securityHeaders: null,
       error: "Steam API тимчасово недоступний, спробую при наступній перевірці",
     };
   }
 
   try {
+    const fetchStart = Date.now();
     const res = await fetchWithTimeout(url, {
       redirect: "follow",
       headers: { "user-agent": BOT_USER_AGENT },
     });
+    const responseMs = Date.now() - fetchStart;
     const status = res.status;
     // A non-2xx response body is almost always an error/bot-challenge page
     // ("Just a moment...", "Access denied"...), never the real page title.
@@ -463,6 +519,11 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
           price: null,
           priceTrusted: false,
           stock: null,
+          responseMs,
+          pageSizeBytes: null,
+          platform: null,
+          hosting: null,
+          securityHeaders: null,
           error: `Селектор "${selector}" нічого не знайшов на сторінці`,
         };
       }
@@ -480,6 +541,11 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
         price: extractPrice(text),
         priceTrusted: true,
         stock: extractStock(text),
+        responseMs,
+        pageSizeBytes: null,
+        platform: null,
+        hosting: null,
+        securityHeaders: null,
       };
     }
 
@@ -504,6 +570,15 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       price: ok ? structured.price ?? extractPrice(text) : null,
       priceTrusted: Boolean(structured.price),
       stock: ok ? structured.stock ?? extractStock(text) : null,
+      // "Site info" — technical facts about the site itself rather than any
+      // product on it, shown for every watch regardless of whether it's a
+      // shop or a plain page (this is exactly what a portfolio/blog watch
+      // has to offer beyond a bare status line).
+      responseMs,
+      pageSizeBytes: ok ? new TextEncoder().encode(html).length : null,
+      platform: ok ? detectPlatform(html) : null,
+      hosting: detectHosting(res.headers),
+      securityHeaders: detectSecurityHeaders(res.headers),
     };
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);
@@ -527,6 +602,11 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       content: null,
       price: null,
       priceTrusted: false,
+      responseMs: null,
+      pageSizeBytes: null,
+      platform: null,
+      hosting: null,
+      securityHeaders: null,
       stock: null,
       error: message,
     };
