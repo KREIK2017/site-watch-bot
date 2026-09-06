@@ -1,18 +1,19 @@
 import type { Env } from "./types";
 
-export const SUPPORTED_CURRENCIES = ["UAH", "USD", "EUR", "GBP", "PLN"] as const;
+export const SUPPORTED_CURRENCIES = ["UAH", "USD", "EUR", "RUB"] as const;
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
   "₴": "UAH",
   $: "USD",
   "€": "EUR",
   "£": "GBP",
+  "₽": "RUB",
   zł: "PLN",
   лв: "BGN",
   "¥": "JPY",
 };
 
-const KNOWN_CODES = new Set(["UAH", "USD", "EUR", "GBP", "PLN", "BGN", "JPY", "CZK", "CHF", "CAD", "AUD"]);
+const KNOWN_CODES = new Set(["UAH", "USD", "EUR", "GBP", "PLN", "BGN", "JPY", "CZK", "CHF", "CAD", "AUD", "RUB"]);
 
 export const CURRENCY_LABEL: Record<string, string> = {
   UAH: "грн",
@@ -22,6 +23,7 @@ export const CURRENCY_LABEL: Record<string, string> = {
   PLN: "zł",
   BGN: "лв",
   JPY: "¥",
+  RUB: "₽",
 };
 
 // Best-effort money parser: handles "1 399₴", "36.32 BGN", "€49.99", "501.50"
@@ -124,5 +126,22 @@ export async function setChatCurrency(env: Env, chatId: number, currency: string
      ON CONFLICT(chat_id) DO UPDATE SET currency = excluded.currency`
   )
     .bind(chatId, currency)
+    .run();
+}
+
+// Same table as currency — one row of per-chat preferences.
+export async function getChatLanguage(env: Env, chatId: number): Promise<string | null> {
+  const row = await env.DB.prepare("SELECT language FROM chat_settings WHERE chat_id = ?")
+    .bind(chatId)
+    .first<{ language: string | null }>();
+  return row?.language ?? null;
+}
+
+export async function setChatLanguage(env: Env, chatId: number, language: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO chat_settings (chat_id, language) VALUES (?, ?)
+     ON CONFLICT(chat_id) DO UPDATE SET language = excluded.language`
+  )
+    .bind(chatId, language)
     .run();
 }

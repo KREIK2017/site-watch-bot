@@ -1,13 +1,24 @@
-import { analyzeUrl, BOT_USER_AGENT, fetchWithTimeout, findPriceCandidates, humanizeStatus } from "./checker";
-import { convertPrice, getChatCurrency, setChatCurrency } from "./currency";
+import { analyzeUrl, BOT_USER_AGENT, fetchWithTimeout, findPriceCandidates } from "./checker";
+import { convertPrice, getChatCurrency, setChatCurrency, setChatLanguage, SUPPORTED_CURRENCIES } from "./currency";
 import { formatHistoryDate, getHistory, recordHistory } from "./history";
+import {
+  getChatLang,
+  humanizeStatus,
+  isLang,
+  LANGUAGE_NAMES,
+  localizeStock,
+  SUPPORTED_LANGUAGES,
+  t,
+  type Lang,
+} from "./i18n";
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMainMenu, sendMessage, watchLink } from "./telegram";
 import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage, WatchRow } from "./types";
 
 const MAX_WATCHES_PER_CHAT = 20;
 
-function formatResponseTime(ms: number): string {
-  return ms >= 1000 ? `${(ms / 1000).toFixed(2)} с` : `${ms} мс`;
+function formatResponseTime(ms: number, lang: Lang): string {
+  const unit = ms >= 1000 ? (lang === "en" ? "s" : "с") : lang === "en" ? "ms" : "мс";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)} ${unit}` : `${ms} ${unit}`;
 }
 
 function formatPageSize(bytes: number): string {
@@ -18,66 +29,55 @@ function formatPageSize(bytes: number): string {
 // page size are available for every watch; platform/hosting/security
 // headers only for a plain (no-selector) page fetch.
 function buildSiteInfoLines(
-  w: Pick<WatchRow, "last_response_ms" | "last_page_size" | "last_platform" | "last_hosting" | "last_security_headers">
+  w: Pick<WatchRow, "last_response_ms" | "last_page_size" | "last_platform" | "last_hosting" | "last_security_headers">,
+  lang: Lang
 ): string[] {
   const lines: string[] = [];
-  if (w.last_response_ms !== null) lines.push(`⏱ Відповідь: ${formatResponseTime(w.last_response_ms)}`);
-  if (w.last_page_size !== null) lines.push(`📦 Розмір сторінки: ${formatPageSize(w.last_page_size)}`);
-  if (w.last_platform) lines.push(`🧩 Платформа: ${escapeHtml(w.last_platform)}`);
-  if (w.last_hosting) lines.push(`☁️ Хостинг/CDN: ${escapeHtml(w.last_hosting)}`);
-  if (w.last_security_headers) lines.push(`🔒 Заголовки безпеки: ${escapeHtml(w.last_security_headers)}`);
+  if (w.last_response_ms !== null) lines.push(t(lang, "responseTime", { time: formatResponseTime(w.last_response_ms, lang) }));
+  if (w.last_page_size !== null) lines.push(t(lang, "pageSize", { size: formatPageSize(w.last_page_size) }));
+  if (w.last_platform) lines.push(t(lang, "platform", { platform: escapeHtml(w.last_platform) }));
+  if (w.last_hosting) lines.push(t(lang, "hosting", { hosting: escapeHtml(w.last_hosting) }));
+  if (w.last_security_headers) lines.push(t(lang, "securityHeaders", { headers: escapeHtml(w.last_security_headers) }));
   return lines;
 }
 
-const CURRENCY_OPTIONS: { code: string; label: string }[] = [
-  { code: "UAH", label: "🇺🇦 UAH" },
-  { code: "USD", label: "🇺🇸 USD" },
-  { code: "EUR", label: "🇪🇺 EUR" },
-  { code: "GBP", label: "🇬🇧 GBP" },
-  { code: "PLN", label: "🇵🇱 PLN" },
-];
+const LANGUAGE_FLAGS: Record<Lang, string> = { uk: "🇺🇦", ru: "🇷🇺", en: "🇬🇧" };
+
+function languageKeyboard(): InlineKeyboardButton[][] {
+  return [
+    SUPPORTED_LANGUAGES.map((code) => ({
+      text: `${LANGUAGE_FLAGS[code]} ${LANGUAGE_NAMES[code]}`,
+      callback_data: `lang:${code}`,
+    })),
+  ];
+}
 
 function currencyKeyboard(): InlineKeyboardButton[][] {
-  return [
-    [CURRENCY_OPTIONS[0], CURRENCY_OPTIONS[1]].map((c) => ({ text: c.label, callback_data: `curr:${c.code}` })),
-    [CURRENCY_OPTIONS[2], CURRENCY_OPTIONS[3]].map((c) => ({ text: c.label, callback_data: `curr:${c.code}` })),
-    [{ text: CURRENCY_OPTIONS[4].label, callback_data: `curr:${CURRENCY_OPTIONS[4].code}` }],
-  ];
+  return [SUPPORTED_CURRENCIES.map((code) => ({ text: code, callback_data: `curr:${code}` }))];
+}
+
+function menuLabels(lang: Lang): { mySites: string; addSite: string; help: string } {
+  return { mySites: t(lang, "menuMySites"), addSite: t(lang, "menuAddSite"), help: t(lang, "menuHelp") };
+}
+
+// A user's persistent reply-keyboard buttons keep showing whatever language
+// was active when /start (or a language switch) last rendered them — so a
+// plain-text match has to recognize the label in *any* supported language,
+// not just the chat's current one.
+const MENU_LABEL_ACTIONS: Record<string, "list" | "addSite" | "help"> = {};
+for (const code of SUPPORTED_LANGUAGES) {
+  MENU_LABEL_ACTIONS[t(code, "menuMySites")] = "list";
+  MENU_LABEL_ACTIONS[t(code, "menuAddSite")] = "addSite";
+  MENU_LABEL_ACTIONS[t(code, "menuHelp")] = "help";
 }
 
 // "auto:<rule>:<index>" is an internal addressing scheme from the candidate
 // picker, meaningless to a user — only show a selector back when they typed
 // it themselves.
-function describeSelector(selector: string | null): string | null {
+function describeSelector(selector: string | null, lang: Lang): string | null {
   if (!selector || selector.startsWith("auto:")) return null;
-  return `Елемент: <code>${escapeHtml(selector)}</code>`;
+  return t(lang, "elementLabel", { selector: `<code>${escapeHtml(selector)}</code>` });
 }
-
-const WELCOME_TEXT = `<b>Site Watch Bot</b>
-Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу сторінки чи вмісту.
-
-Користуйся кнопками знизу або команда <code>/help</code> для повної довідки.`;
-
-const HELP_TEXT = `<b>Site Watch Bot</b>
-Слідкую за сайтами і повідомляю про зміни ціни, наявності, статусу чи вмісту сторінки.
-
-<b>Команди:</b>
-/watch &lt;url&gt; — почати стежити
-/list — мої сайти (тисни ⚙️ #id, щоб керувати конкретним)
-/check &lt;id&gt; — перевірити зараз
-/history &lt;id&gt; — історія цін/наявності
-/rename &lt;id&gt; &lt;назва&gt; — перейменувати
-/pause &lt;id&gt; — призупинити перевірки
-/resume &lt;id&gt; — відновити перевірки
-/unwatch &lt;id&gt; — прибрати зі списку
-/currency — обрати валюту показу цін
-/help — ця довідка
-
-<b>Приклади:</b>
-<code>/watch https://example.com/product</code>
-<code>/watch https://store.steampowered.com/app/12345/GameName</code>
-
-Можна просто вставити посилання в чат без команди — теж спрацює.`;
 
 // Opening the product page is the clickable name link in the message text
 // (watchLink) — Telegram opens plain in-message links in its own in-app
@@ -92,22 +92,23 @@ const HELP_TEXT = `<b>Site Watch Bot</b>
 // line they relate to).
 function actionRows(
   w: { id: number; price: string | null; priceTrusted: boolean; paused: boolean },
+  lang: Lang,
   opts: { back?: boolean } = {}
 ): InlineKeyboardButton[][] {
   const rows: InlineKeyboardButton[][] = [
     [
-      { text: "🔄 Перевірити", callback_data: `chk:${w.id}` },
+      { text: t(lang, "btnCheck"), callback_data: `chk:${w.id}` },
       w.paused
-        ? { text: "▶️ Відновити", callback_data: `res:${w.id}` }
-        : { text: "⏸ Пауза", callback_data: `pau:${w.id}` },
+        ? { text: t(lang, "btnResume"), callback_data: `res:${w.id}` }
+        : { text: t(lang, "btnPause"), callback_data: `pau:${w.id}` },
     ],
-    [{ text: "🗑 Видалити", callback_data: `unw:${w.id}` }],
+    [{ text: t(lang, "btnDelete"), callback_data: `unw:${w.id}` }],
   ];
   if (w.price && !w.priceTrusted) {
-    rows.push([{ text: "❔ Не та ціна?", callback_data: `fix:${w.id}` }]);
+    rows.push([{ text: t(lang, "btnWrongPrice"), callback_data: `fix:${w.id}` }]);
   }
   if (opts.back) {
-    rows.push([{ text: "⬅️ До списку", callback_data: "back" }]);
+    rows.push([{ text: t(lang, "btnBack"), callback_data: "back" }]);
   }
   return rows;
 }
@@ -162,13 +163,10 @@ function parseIdAndText(arg: string): { id: number; text: string } | null {
 }
 
 async function handleWatch(env: Env, chatId: number, arg: string): Promise<void> {
+  const lang = await getChatLang(env, chatId);
   const parsed = parseWatchArgs(arg);
   if (!parsed) {
-    await sendMessage(
-      env.BOT_TOKEN,
-      chatId,
-      "Вкажи посилання: <code>/watch https://example.com</code>\nЩоб стежити за конкретним товаром, додай CSS-селектор: <code>/watch https://example.com/product .price</code>"
-    );
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "watchUsage"));
     return;
   }
   const { url, selector } = parsed;
@@ -179,7 +177,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     .bind(chatId, url, selector)
     .first<{ id: number }>();
   if (existing) {
-    await sendMessage(env.BOT_TOKEN, chatId, `Вже стежу за цим сайтом (id ${existing.id}).`);
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "alreadyWatching", { id: existing.id }));
     return;
   }
 
@@ -187,11 +185,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     .bind(chatId)
     .first<{ count: number }>()) ?? { count: 0 };
   if (count >= MAX_WATCHES_PER_CHAT) {
-    await sendMessage(
-      env.BOT_TOKEN,
-      chatId,
-      `Досягнуто ліміту ${MAX_WATCHES_PER_CHAT} сайтів на чат. Прибери щось непотрібне через /list, щоб додати нове.`
-    );
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "limitReached", { max: MAX_WATCHES_PER_CHAT }));
     return;
   }
 
@@ -224,33 +218,37 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     await recordHistory(env, inserted.id, baseline.price, baseline.stock, baseline.status);
   }
 
-  const lines = [`✅ Стежу за <b>${watchLink(url, baseline.title)}</b> (id ${inserted?.id})`];
-  const selectorLine = describeSelector(selector);
+  const lines = [t(lang, "watchAdded", { link: `<b>${watchLink(url, baseline.title)}</b>`, id: inserted?.id ?? "" })];
+  const selectorLine = describeSelector(selector, lang);
   if (selectorLine) lines.push(selectorLine);
   if (baseline.error) {
     lines.push(`⚠️ ${escapeHtml(baseline.error)}`);
   } else {
-    lines.push(`Статус: ${humanizeStatus(baseline.status)}`);
+    lines.push(t(lang, "statusLabel", { status: humanizeStatus(baseline.status, lang) }));
     if (baseline.price) {
       const currency = await getChatCurrency(env, chatId);
       const priceDisplay = await convertPrice(env, baseline.price, currency);
-      lines.push(`Ціна: ${escapeHtml(priceDisplay ?? baseline.price)}`);
+      lines.push(t(lang, "priceLabel", { price: escapeHtml(priceDisplay ?? baseline.price) }));
     }
-    if (baseline.stock) lines.push(`Наявність: ${escapeHtml(baseline.stock)}`);
+    const stockDisplay = localizeStock(baseline.stock, lang);
+    if (stockDisplay) lines.push(t(lang, "stockLabel", { stock: escapeHtml(stockDisplay) }));
     if (!baseline.price && !baseline.stock && baseline.value) {
-      lines.push(`Значення: ${escapeHtml(baseline.value)}`);
+      lines.push(t(lang, "valueLabel", { value: escapeHtml(baseline.value) }));
     }
-    const siteInfo = buildSiteInfoLines({
-      last_response_ms: baseline.responseMs,
-      last_page_size: baseline.pageSizeBytes,
-      last_platform: baseline.platform,
-      last_hosting: baseline.hosting,
-      last_security_headers: baseline.securityHeaders,
-    });
-    if (siteInfo.length) lines.push("", "🔧 <b>Технічна інформація</b>", ...siteInfo);
+    const siteInfo = buildSiteInfoLines(
+      {
+        last_response_ms: baseline.responseMs,
+        last_page_size: baseline.pageSizeBytes,
+        last_platform: baseline.platform,
+        last_hosting: baseline.hosting,
+        last_security_headers: baseline.securityHeaders,
+      },
+      lang
+    );
+    if (siteInfo.length) lines.push("", t(lang, "techInfoHeader"), ...siteInfo);
   }
   const keyboard = inserted
-    ? actionRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted, paused: false })
+    ? actionRows({ id: inserted.id, price: baseline.price, priceTrusted: baseline.priceTrusted, paused: false }, lang)
     : undefined;
   await sendMessage(env.BOT_TOKEN, chatId, lines.join("\n"), keyboard);
 }
@@ -271,7 +269,8 @@ type ListRow = Pick<
 
 async function buildListView(
   env: Env,
-  chatId: number
+  chatId: number,
+  lang: Lang
 ): Promise<{ text: string; keyboard: InlineKeyboardButton[][] }> {
   const { results } = await env.DB.prepare(
     "SELECT id, url, label, selector, last_status, last_price, price_trusted, last_stock, last_value, paused FROM watches WHERE chat_id = ? AND active = 1 ORDER BY id"
@@ -280,18 +279,19 @@ async function buildListView(
     .all<ListRow>();
 
   if (!results.length) {
-    return { text: "Список порожній. Додай сайт: <code>/watch https://example.com</code>", keyboard: [] };
+    return { text: t(lang, "emptyList"), keyboard: [] };
   }
 
   const currency = await getChatCurrency(env, chatId);
   const lines = await Promise.all(
     results.map(async (w) => {
       const parts = [`#${w.id} ${watchLink(w.url, w.label)}`];
-      if (w.paused) parts.push("⏸ на паузі");
-      else parts.push(humanizeStatus(w.last_status));
+      if (w.paused) parts.push(t(lang, "pausedBadge"));
+      else parts.push(humanizeStatus(w.last_status, lang));
       const priceDisplay = await convertPrice(env, w.last_price, currency);
-      if (priceDisplay) parts.push(`ціна ${escapeHtml(priceDisplay)}`);
-      if (w.last_stock) parts.push(escapeHtml(w.last_stock));
+      if (priceDisplay) parts.push(escapeHtml(priceDisplay));
+      const stockDisplay = localizeStock(w.last_stock, lang);
+      if (stockDisplay) parts.push(escapeHtml(stockDisplay));
       if (!w.last_price && !w.last_stock && w.last_value) parts.push(escapeHtml(w.last_value));
       if (w.selector) parts.push("🎯");
       return parts.join(" — ");
@@ -305,7 +305,8 @@ async function buildListView(
 }
 
 async function handleList(env: Env, chatId: number): Promise<void> {
-  const { text, keyboard } = await buildListView(env, chatId);
+  const lang = await getChatLang(env, chatId);
+  const { text, keyboard } = await buildListView(env, chatId, lang);
   await sendMessage(env.BOT_TOKEN, chatId, text, keyboard.length ? keyboard : undefined);
 }
 
@@ -315,7 +316,8 @@ async function handleList(env: Env, chatId: number): Promise<void> {
 async function buildDetailView(
   env: Env,
   chatId: number,
-  id: number
+  id: number,
+  lang: Lang
 ): Promise<{ text: string; keyboard: InlineKeyboardButton[][] } | null> {
   const watch = await env.DB.prepare("SELECT * FROM watches WHERE id = ? AND chat_id = ? AND active = 1")
     .bind(id, chatId)
@@ -323,33 +325,36 @@ async function buildDetailView(
   if (!watch) return null;
 
   const lines = [`<b>${watchLink(watch.url, watch.label)}</b> (id ${watch.id})`];
-  if (watch.paused) lines.push("⏸ На паузі — перевірки не виконуються");
-  const selectorLine = describeSelector(watch.selector);
+  if (watch.paused) lines.push(t(lang, "pausedNote"));
+  const selectorLine = describeSelector(watch.selector, lang);
   if (selectorLine) lines.push(selectorLine);
-  lines.push(`Статус: ${humanizeStatus(watch.last_status)}`);
+  lines.push(t(lang, "statusLabel", { status: humanizeStatus(watch.last_status, lang) }));
   const currency = await getChatCurrency(env, chatId);
   const priceDisplay = await convertPrice(env, watch.last_price, currency);
-  if (priceDisplay) lines.push(`Ціна: ${escapeHtml(priceDisplay)}`);
-  if (watch.last_stock) lines.push(`Наявність: ${escapeHtml(watch.last_stock)}`);
+  if (priceDisplay) lines.push(t(lang, "priceLabel", { price: escapeHtml(priceDisplay) }));
+  const stockDisplay = localizeStock(watch.last_stock, lang);
+  if (stockDisplay) lines.push(t(lang, "stockLabel", { stock: escapeHtml(stockDisplay) }));
   if (!watch.last_price && !watch.last_stock && watch.last_value) {
-    lines.push(`Значення: ${escapeHtml(watch.last_value)}`);
+    lines.push(t(lang, "valueLabel", { value: escapeHtml(watch.last_value) }));
   }
-  const siteInfo = buildSiteInfoLines(watch);
-  if (siteInfo.length) lines.push("", "🔧 <b>Технічна інформація</b>", ...siteInfo);
+  const siteInfo = buildSiteInfoLines(watch, lang);
+  if (siteInfo.length) lines.push("", t(lang, "techInfoHeader"), ...siteInfo);
 
   return {
     text: lines.join("\n"),
     keyboard: actionRows(
       { id: watch.id, price: watch.last_price, priceTrusted: Boolean(watch.price_trusted), paused: Boolean(watch.paused) },
+      lang,
       { back: true }
     ),
   };
 }
 
 async function handleUnwatch(env: Env, chatId: number, arg: string): Promise<void> {
+  const lang = await getChatLang(env, chatId);
   const id = Number(arg.trim());
   if (!Number.isInteger(id)) {
-    await sendMessage(env.BOT_TOKEN, chatId, "Вкажи id зі списку: <code>/unwatch 3</code>");
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "idUsage", { example: "/unwatch 3" }));
     return;
   }
   const result = await env.DB.prepare(
@@ -361,14 +366,15 @@ async function handleUnwatch(env: Env, chatId: number, arg: string): Promise<voi
   await sendMessage(
     env.BOT_TOKEN,
     chatId,
-    changed > 0 ? `Прибрав id ${id} зі списку.` : `Не знайшов активний watch з id ${id}.`
+    changed > 0 ? t(lang, "unwatchDone", { id }) : t(lang, "notFoundActive", { id })
   );
 }
 
 async function handleRename(env: Env, chatId: number, arg: string): Promise<void> {
+  const lang = await getChatLang(env, chatId);
   const parsed = parseIdAndText(arg);
   if (!parsed) {
-    await sendMessage(env.BOT_TOKEN, chatId, "Формат: <code>/rename 3 Нова назва</code>");
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "renameUsage"));
     return;
   }
   const result = await env.DB.prepare("UPDATE watches SET label = ? WHERE id = ? AND chat_id = ? AND active = 1")
@@ -378,7 +384,9 @@ async function handleRename(env: Env, chatId: number, arg: string): Promise<void
   await sendMessage(
     env.BOT_TOKEN,
     chatId,
-    changed > 0 ? `Перейменовано id ${parsed.id} на «${parsed.text}».` : `Не знайшов активний watch з id ${parsed.id}.`
+    changed > 0
+      ? t(lang, "renameDone", { id: parsed.id, name: parsed.text })
+      : t(lang, "notFoundActive", { id: parsed.id })
   );
 }
 
@@ -392,41 +400,38 @@ async function setPaused(env: Env, chatId: number, id: number, paused: boolean):
 }
 
 async function handlePauseCommand(env: Env, chatId: number, arg: string, paused: boolean): Promise<void> {
+  const lang = await getChatLang(env, chatId);
   const id = Number(arg.trim());
-  const usage = paused ? "/pause 3" : "/resume 3";
   if (!Number.isInteger(id)) {
-    await sendMessage(env.BOT_TOKEN, chatId, `Вкажи id зі списку: <code>${usage}</code>`);
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "idUsage", { example: paused ? "/pause 3" : "/resume 3" }));
     return;
   }
   const changed = await setPaused(env, chatId, id, paused);
   await sendMessage(
     env.BOT_TOKEN,
     chatId,
-    changed
-      ? paused
-        ? `⏸ Призупинив перевірки для id ${id}.`
-        : `▶️ Відновив перевірки для id ${id}.`
-      : `Не знайшов активний watch з id ${id}.`
+    changed ? t(lang, paused ? "pausedDone" : "resumedDone", { id }) : t(lang, "notFoundActive", { id })
   );
 }
 
 async function handleHistory(env: Env, chatId: number, arg: string): Promise<void> {
+  const lang = await getChatLang(env, chatId);
   const id = Number(arg.trim());
   if (!Number.isInteger(id)) {
-    await sendMessage(env.BOT_TOKEN, chatId, "Вкажи id зі списку: <code>/history 3</code>");
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "idUsage", { example: "/history 3" }));
     return;
   }
   const watch = await env.DB.prepare("SELECT * FROM watches WHERE id = ? AND chat_id = ?")
     .bind(id, chatId)
     .first<WatchRow>();
   if (!watch) {
-    await sendMessage(env.BOT_TOKEN, chatId, `Не знайшов watch з id ${id}.`);
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "notFoundAny", { id }));
     return;
   }
 
   const entries = await getHistory(env, id);
   if (!entries.length) {
-    await sendMessage(env.BOT_TOKEN, chatId, "Історії ще немає — зачекай на першу зафіксовану зміну.");
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "historyEmpty"));
     return;
   }
 
@@ -436,7 +441,8 @@ async function handleHistory(env: Env, chatId: number, arg: string): Promise<voi
       const parts = [formatHistoryDate(entry.checked_at)];
       const priceDisplay = await convertPrice(env, entry.price, currency);
       if (priceDisplay) parts.push(escapeHtml(priceDisplay));
-      if (entry.stock) parts.push(escapeHtml(entry.stock));
+      const stockDisplay = localizeStock(entry.stock, lang);
+      if (stockDisplay) parts.push(escapeHtml(stockDisplay));
       return parts.join(" — ");
     })
   );
@@ -444,7 +450,12 @@ async function handleHistory(env: Env, chatId: number, arg: string): Promise<voi
   await sendMessage(env.BOT_TOKEN, chatId, `<b>${watchLink(watch.url, watch.label)}</b>\n\n${lines.join("\n")}`);
 }
 
-async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: string; watch: WatchRow } | null> {
+async function runCheck(
+  env: Env,
+  chatId: number,
+  id: number,
+  lang: Lang
+): Promise<{ text: string; watch: WatchRow } | null> {
   const watch = await env.DB.prepare("SELECT * FROM watches WHERE id = ? AND chat_id = ? AND active = 1")
     .bind(id, chatId)
     .first<WatchRow>();
@@ -498,42 +509,47 @@ async function runCheck(env: Env, chatId: number, id: number): Promise<{ text: s
   }
 
   const lines = [`<b>${watchLink(watch.url, watch.label ?? result.title)}</b>`];
-  const selectorLine = describeSelector(watch.selector);
+  const selectorLine = describeSelector(watch.selector, lang);
   if (selectorLine) lines.push(selectorLine);
   if (result.error) {
     lines.push(`⚠️ ${escapeHtml(result.error)}`);
   } else {
-    lines.push(`Статус: ${humanizeStatus(result.status)}`);
+    lines.push(t(lang, "statusLabel", { status: humanizeStatus(result.status, lang) }));
     if (result.price) {
       const currency = await getChatCurrency(env, chatId);
       const priceDisplay = await convertPrice(env, result.price, currency);
-      lines.push(`Ціна: ${escapeHtml(priceDisplay ?? result.price)}`);
+      lines.push(t(lang, "priceLabel", { price: escapeHtml(priceDisplay ?? result.price) }));
     }
-    if (result.stock) lines.push(`Наявність: ${escapeHtml(result.stock)}`);
+    const stockDisplay = localizeStock(result.stock, lang);
+    if (stockDisplay) lines.push(t(lang, "stockLabel", { stock: escapeHtml(stockDisplay) }));
     if (!result.price && !result.stock && result.value) {
-      lines.push(`Значення: ${escapeHtml(result.value)}`);
+      lines.push(t(lang, "valueLabel", { value: escapeHtml(result.value) }));
     }
-    const siteInfo = buildSiteInfoLines({
-      last_response_ms: result.responseMs,
-      last_page_size: result.pageSizeBytes,
-      last_platform: result.platform,
-      last_hosting: result.hosting,
-      last_security_headers: result.securityHeaders,
-    });
-    if (siteInfo.length) lines.push("", "🔧 <b>Технічна інформація</b>", ...siteInfo);
+    const siteInfo = buildSiteInfoLines(
+      {
+        last_response_ms: result.responseMs,
+        last_page_size: result.pageSizeBytes,
+        last_platform: result.platform,
+        last_hosting: result.hosting,
+        last_security_headers: result.securityHeaders,
+      },
+      lang
+    );
+    if (siteInfo.length) lines.push("", t(lang, "techInfoHeader"), ...siteInfo);
   }
   return { text: lines.join("\n"), watch };
 }
 
 async function handleCheck(env: Env, chatId: number, arg: string): Promise<void> {
+  const lang = await getChatLang(env, chatId);
   const id = Number(arg.trim());
   if (!Number.isInteger(id)) {
-    await sendMessage(env.BOT_TOKEN, chatId, "Вкажи id зі списку: <code>/check 3</code>");
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "idUsage", { example: "/check 3" }));
     return;
   }
-  const outcome = await runCheck(env, chatId, id);
+  const outcome = await runCheck(env, chatId, id, lang);
   if (!outcome) {
-    await sendMessage(env.BOT_TOKEN, chatId, `Не знайшов активний watch з id ${id}.`);
+    await sendMessage(env.BOT_TOKEN, chatId, t(lang, "notFoundActive", { id }));
     return;
   }
   await sendMessage(env.BOT_TOKEN, chatId, outcome.text);
@@ -551,17 +567,16 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
   const text = (message.text ?? "").trim();
 
   if (!text.startsWith("/")) {
-    if (text === "📋 Мої сайти") return handleList(env, chatId);
-    if (text === "❓ Допомога") {
-      await sendMessage(env.BOT_TOKEN, chatId, HELP_TEXT);
+    const menuAction = MENU_LABEL_ACTIONS[text];
+    if (menuAction === "list") return handleList(env, chatId);
+    if (menuAction === "help") {
+      const lang = await getChatLang(env, chatId);
+      await sendMessage(env.BOT_TOKEN, chatId, t(lang, "help"));
       return;
     }
-    if (text === "➕ Додати сайт") {
-      await sendMessage(
-        env.BOT_TOKEN,
-        chatId,
-        "Надішли посилання на сайт (за бажанням через пробіл додай CSS-селектор товару), напр.:\nhttps://example.com\nhttps://example.com/product .price"
-      );
+    if (menuAction === "addSite") {
+      const lang = await getChatLang(env, chatId);
+      await sendMessage(env.BOT_TOKEN, chatId, t(lang, "addSitePrompt"));
       return;
     }
     const firstToken = text.split(/\s+/)[0] ?? "";
@@ -577,16 +592,24 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
 
   switch (command) {
     case "/start": {
-      await sendMainMenu(env.BOT_TOKEN, chatId, WELCOME_TEXT);
-      const currency = await getChatCurrency(env, chatId);
-      if (!currency) {
-        await sendMessage(env.BOT_TOKEN, chatId, "В якій валюті показувати ціни?", currencyKeyboard());
+      const storedLangRaw = await env.DB.prepare("SELECT language FROM chat_settings WHERE chat_id = ?")
+        .bind(chatId)
+        .first<{ language: string | null }>();
+      const lang = await getChatLang(env, chatId);
+      await sendMainMenu(env.BOT_TOKEN, chatId, t(lang, "welcome"), menuLabels(lang));
+      if (!storedLangRaw?.language) {
+        await sendMessage(env.BOT_TOKEN, chatId, t(lang, "askLanguage"), languageKeyboard());
+      } else {
+        const currency = await getChatCurrency(env, chatId);
+        if (!currency) await sendMessage(env.BOT_TOKEN, chatId, t(lang, "askCurrency"), currencyKeyboard());
       }
       break;
     }
-    case "/help":
-      await sendMessage(env.BOT_TOKEN, chatId, HELP_TEXT);
+    case "/help": {
+      const lang = await getChatLang(env, chatId);
+      await sendMessage(env.BOT_TOKEN, chatId, t(lang, "help"));
       break;
+    }
     case "/watch":
       await handleWatch(env, chatId, arg);
       break;
@@ -611,20 +634,29 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
     case "/resume":
       await handlePauseCommand(env, chatId, arg, false);
       break;
-    case "/currency":
-      await sendMessage(env.BOT_TOKEN, chatId, "В якій валюті показувати ціни?", currencyKeyboard());
+    case "/currency": {
+      const lang = await getChatLang(env, chatId);
+      await sendMessage(env.BOT_TOKEN, chatId, t(lang, "askCurrency"), currencyKeyboard());
       break;
-    default:
-      await sendMessage(env.BOT_TOKEN, chatId, "Не знаю такої команди. /help — список команд.");
+    }
+    case "/language": {
+      const lang = await getChatLang(env, chatId);
+      await sendMessage(env.BOT_TOKEN, chatId, t(lang, "askLanguage"), languageKeyboard());
+      break;
+    }
+    default: {
+      const lang = await getChatLang(env, chatId);
+      await sendMessage(env.BOT_TOKEN, chatId, t(lang, "unknownCommand"));
+    }
   }
 }
 
-async function handleFixButton(env: Env, chatId: number, queryId: string, id: number): Promise<void> {
+async function handleFixButton(env: Env, chatId: number, queryId: string, id: number, lang: Lang): Promise<void> {
   const watch = await env.DB.prepare("SELECT * FROM watches WHERE id = ? AND chat_id = ? AND active = 1")
     .bind(id, chatId)
     .first<WatchRow>();
   if (!watch) {
-    await answerCallbackQuery(env.BOT_TOKEN, queryId, "Не знайдено");
+    await answerCallbackQuery(env.BOT_TOKEN, queryId, t(lang, "toastNotFound"));
     return;
   }
 
@@ -637,7 +669,7 @@ async function handleFixButton(env: Env, chatId: number, queryId: string, id: nu
   }
 
   if (!candidates.length) {
-    await answerCallbackQuery(env.BOT_TOKEN, queryId, "Не знайшов інших варіантів на сторінці");
+    await answerCallbackQuery(env.BOT_TOKEN, queryId, t(lang, "fixNoCandidates"));
     return;
   }
 
@@ -648,7 +680,7 @@ async function handleFixButton(env: Env, chatId: number, queryId: string, id: nu
   await sendMessage(
     env.BOT_TOKEN,
     chatId,
-    `Знайшов кілька можливих значень ціни на <b>${watchLink(watch.url, watch.label)}</b>. Яке правильне?`,
+    t(lang, "fixPrompt", { link: `<b>${watchLink(watch.url, watch.label)}</b>` }),
     rows
   );
 }
@@ -659,7 +691,8 @@ async function handlePickCandidate(
   queryId: string,
   id: number,
   ruleId: string,
-  indexRaw: string
+  indexRaw: string,
+  lang: Lang
 ): Promise<void> {
   const selector = `auto:${ruleId}:${indexRaw}`;
   const result = await env.DB.prepare(
@@ -668,12 +701,12 @@ async function handlePickCandidate(
     .bind(selector, id, chatId)
     .run();
   if (!(result.meta.changes ?? 0)) {
-    await answerCallbackQuery(env.BOT_TOKEN, queryId, "Не знайдено");
+    await answerCallbackQuery(env.BOT_TOKEN, queryId, t(lang, "toastNotFound"));
     return;
   }
 
-  const outcome = await runCheck(env, chatId, id);
-  await answerCallbackQuery(env.BOT_TOKEN, queryId, "Збережено ✅");
+  const outcome = await runCheck(env, chatId, id, lang);
+  await answerCallbackQuery(env.BOT_TOKEN, queryId, t(lang, "toastSaved"));
   if (outcome) await sendMessage(env.BOT_TOKEN, chatId, outcome.text);
 }
 
@@ -684,19 +717,35 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
   const [action, idRaw, ...rest] = data.split(":");
 
   if (!chatId) {
-    await answerCallbackQuery(env.BOT_TOKEN, query.id, "Кнопка застаріла");
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, "…");
     return;
   }
 
+  const lang = await getChatLang(env, chatId);
+
   if (action === "curr") {
     await setChatCurrency(env, chatId, idRaw);
-    await answerCallbackQuery(env.BOT_TOKEN, query.id, `Валюта: ${idRaw} ✅`);
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, t(lang, "currencySet", { code: idRaw }));
+    return;
+  }
+
+  if (action === "lang") {
+    if (isLang(idRaw)) {
+      await setChatLanguage(env, chatId, idRaw);
+      await answerCallbackQuery(env.BOT_TOKEN, query.id, t(idRaw, "languageSet", { name: LANGUAGE_NAMES[idRaw] }));
+      // Refresh the persistent menu keyboard in the new language, then chain
+      // into the currency step if it hasn't been picked yet — same two-step
+      // onboarding as a fresh /start.
+      await sendMainMenu(env.BOT_TOKEN, chatId, t(idRaw, "welcome"), menuLabels(idRaw));
+      const currency = await getChatCurrency(env, chatId);
+      if (!currency) await sendMessage(env.BOT_TOKEN, chatId, t(idRaw, "askCurrency"), currencyKeyboard());
+    }
     return;
   }
 
   if (action === "back") {
     if (messageId) {
-      const { text, keyboard } = await buildListView(env, chatId);
+      const { text, keyboard } = await buildListView(env, chatId, lang);
       await editMessageText(env.BOT_TOKEN, chatId, messageId, text, keyboard);
     }
     await answerCallbackQuery(env.BOT_TOKEN, query.id);
@@ -705,22 +754,22 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
 
   const id = Number(idRaw);
   if (!messageId || !Number.isInteger(id)) {
-    await answerCallbackQuery(env.BOT_TOKEN, query.id, "Кнопка застаріла, онови список через /list");
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, t(lang, "toastStaleButtonRefresh"));
     return;
   }
 
   if (action === "mgr") {
-    const detail = await buildDetailView(env, chatId, id);
-    await answerCallbackQuery(env.BOT_TOKEN, query.id, detail ? undefined : "Не знайдено");
+    const detail = await buildDetailView(env, chatId, id, lang);
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, detail ? undefined : t(lang, "toastNotFound"));
     if (detail) await editMessageText(env.BOT_TOKEN, chatId, messageId, detail.text, detail.keyboard);
     return;
   }
 
   if (action === "chk") {
-    const outcome = await runCheck(env, chatId, id);
-    await answerCallbackQuery(env.BOT_TOKEN, query.id, outcome ? "Перевірено ✅" : "Не знайдено");
+    const outcome = await runCheck(env, chatId, id, lang);
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, outcome ? t(lang, "toastChecked") : t(lang, "toastNotFound"));
     if (outcome) {
-      const detail = await buildDetailView(env, chatId, id);
+      const detail = await buildDetailView(env, chatId, id, lang);
       if (detail) await editMessageText(env.BOT_TOKEN, chatId, messageId, detail.text, detail.keyboard);
     }
     return;
@@ -733,9 +782,9 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
       .bind(id, chatId)
       .run();
     const changed = result.meta.changes ?? 0;
-    await answerCallbackQuery(env.BOT_TOKEN, query.id, changed > 0 ? "Прибрано" : "Не знайдено");
+    await answerCallbackQuery(env.BOT_TOKEN, query.id, changed > 0 ? t(lang, "toastRemoved") : t(lang, "toastNotFound"));
     if (changed > 0) {
-      const { text, keyboard } = await buildListView(env, chatId);
+      const { text, keyboard } = await buildListView(env, chatId, lang);
       await editMessageText(env.BOT_TOKEN, chatId, messageId, text, keyboard);
     }
     return;
@@ -746,24 +795,24 @@ export async function handleCallbackQuery(env: Env, query: TelegramCallbackQuery
     await answerCallbackQuery(
       env.BOT_TOKEN,
       query.id,
-      changed ? (action === "pau" ? "⏸ Пауза" : "▶️ Відновлено") : "Не знайдено"
+      changed ? t(lang, action === "pau" ? "toastPaused" : "toastResumed") : t(lang, "toastNotFound")
     );
     if (changed) {
-      const detail = await buildDetailView(env, chatId, id);
+      const detail = await buildDetailView(env, chatId, id, lang);
       if (detail) await editMessageText(env.BOT_TOKEN, chatId, messageId, detail.text, detail.keyboard);
     }
     return;
   }
 
   if (action === "fix") {
-    await handleFixButton(env, chatId, query.id, id);
+    await handleFixButton(env, chatId, query.id, id, lang);
     return;
   }
 
   if (action === "pick") {
     const [ruleId, indexRaw] = rest;
     if (ruleId && indexRaw) {
-      await handlePickCandidate(env, chatId, query.id, id, ruleId, indexRaw);
+      await handlePickCandidate(env, chatId, query.id, id, ruleId, indexRaw, lang);
       return;
     }
   }

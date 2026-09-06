@@ -1,7 +1,8 @@
 import { summarizeChange } from "./ai";
-import { analyzeUrl, humanizeStatus } from "./checker";
+import { analyzeUrl } from "./checker";
 import { convertPrice, getChatCurrency } from "./currency";
 import { recordHistory } from "./history";
+import { getChatLang, humanizeStatus, localizeStock, t, type Lang } from "./i18n";
 import { escapeHtml, sendMessage, watchLink } from "./telegram";
 import type { AnalyzeResult, Env, WatchRow } from "./types";
 
@@ -13,6 +14,7 @@ function isGoodStatus(status: number | null): boolean {
 
 async function buildChanges(
   env: Env,
+  lang: Lang,
   currency: string | null,
   prev: WatchRow,
   next: AnalyzeResult
@@ -20,17 +22,29 @@ async function buildChanges(
   const changes: string[] = [];
 
   if (prev.last_status !== null && next.status !== null && prev.last_status !== next.status) {
-    changes.push(`• Статус: ${humanizeStatus(prev.last_status)} → ${humanizeStatus(next.status)}`);
+    changes.push(
+      t(lang, "changeStatus", { from: humanizeStatus(prev.last_status, lang), to: humanizeStatus(next.status, lang) })
+    );
   }
   if (prev.last_price && next.price && prev.last_price !== next.price) {
     const [prevDisplay, nextDisplay] = await Promise.all([
       convertPrice(env, prev.last_price, currency),
       convertPrice(env, next.price, currency),
     ]);
-    changes.push(`• Ціна: ${escapeHtml(prevDisplay ?? prev.last_price)} → ${escapeHtml(nextDisplay ?? next.price)}`);
+    changes.push(
+      t(lang, "changePrice", {
+        from: escapeHtml(prevDisplay ?? prev.last_price),
+        to: escapeHtml(nextDisplay ?? next.price),
+      })
+    );
   }
   if (prev.last_stock && next.stock && prev.last_stock !== next.stock) {
-    changes.push(`• Наявність: ${escapeHtml(prev.last_stock)} → ${escapeHtml(next.stock)}`);
+    changes.push(
+      t(lang, "changeStock", {
+        from: escapeHtml(localizeStock(prev.last_stock, lang) ?? prev.last_stock),
+        to: escapeHtml(localizeStock(next.stock, lang) ?? next.stock),
+      })
+    );
   }
   // For a selector watch with no price/stock shape (a manga chapter number, a
   // forum reply count, a score...), show the actual old → new value instead
@@ -43,7 +57,7 @@ async function buildChanges(
     next.value &&
     prev.last_value !== next.value
   ) {
-    changes.push(`• Значення: ${escapeHtml(prev.last_value)} → ${escapeHtml(next.value)}`);
+    changes.push(t(lang, "changeValue", { from: escapeHtml(prev.last_value), to: escapeHtml(next.value) }));
   }
   // Only flag a generic whole-page content change on watches that have never
   // shown a price/stock at all (a plain "watch this page" case). Once a page
@@ -61,14 +75,15 @@ async function buildChanges(
     prev.last_hash !== next.textHash
   ) {
     const summary =
-      prev.last_content && next.content ? await summarizeChange(env, prev.last_content, next.content) : null;
-    changes.push(summary ? `• ${summary}` : "• Вміст сторінки змінився");
+      prev.last_content && next.content ? await summarizeChange(env, prev.last_content, next.content, lang) : null;
+    changes.push(summary ? `• ${summary}` : t(lang, "contentChanged"));
   }
 
   return changes;
 }
 
 async function checkOne(env: Env, watch: WatchRow): Promise<void> {
+  const lang = await getChatLang(env, watch.chat_id);
   const result = await analyzeUrl(env, watch.url, watch.selector);
 
   if (result.error) {
@@ -77,7 +92,10 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       await sendMessage(
         env.BOT_TOKEN,
         watch.chat_id,
-        `🚨 <b>${watchLink(watch.url, watch.label)}</b>\nПроблема при перевірці: ${escapeHtml(result.error)}`
+        t(lang, "checkErrorAlert", {
+          link: watchLink(watch.url, watch.label),
+          error: escapeHtml(result.error),
+        })
       );
     }
     await env.DB.prepare(
@@ -121,16 +139,12 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   }
 
   const currency = await getChatCurrency(env, watch.chat_id);
-  const changes = await buildChanges(env, currency, watch, { ...result, status: effectiveStatus });
+  const changes = await buildChanges(env, lang, currency, watch, { ...result, status: effectiveStatus });
   // A brand-new watch (no baseline yet) just gets its baseline stored, no alert.
   if (changes.length > 0 && watch.last_hash !== null) {
-    const text = [
-      `🚨 <b>САЙТ ЗМІНИВСЯ</b>`,
-      watchLink(watch.url, watch.label),
-      "",
-      "Зміни:",
-      ...changes,
-    ].join("\n");
+    const text = [t(lang, "alertHeader"), watchLink(watch.url, watch.label), "", t(lang, "changesLabel"), ...changes].join(
+      "\n"
+    );
     await sendMessage(env.BOT_TOKEN, watch.chat_id, text);
   }
 

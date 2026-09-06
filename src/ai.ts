@@ -1,15 +1,34 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { Lang } from "./i18n";
 import type { Env } from "./types";
 
-const SYSTEM_PROMPT =
-  'Ти аналізуєш зміни на сторінці сайту для бота-монітора. Порівняй старий і новий знімки тексту однієї сторінки та напиши 1-2 речення українською про те, що саме змінилося по суті. Ігноруй дрібні технічні відмінності (пробіли, випадкові числа на кшталт лічильників чи дат). Якщо суттєвої різниці не видно, напиши рівно: «Не вдалося точно визначити, що саме змінилося.» Відповідай тільки самим резюме, без вступних фраз і заголовків.';
+const PROMPT_LANGUAGE_NAME: Record<Lang, string> = {
+  uk: "Ukrainian",
+  ru: "Russian",
+  en: "English",
+};
+
+const NO_CHANGE_TEXT: Record<Lang, string> = {
+  uk: "Не вдалося точно визначити, що саме змінилося.",
+  ru: "Не удалось точно определить, что именно изменилось.",
+  en: "Could not pin down exactly what changed.",
+};
+
+function buildSystemPrompt(lang: Lang): string {
+  return (
+    `You analyze changes to a web page for a monitoring bot. Compare the old and new text snapshots of the same ` +
+    `page and write 1-2 sentences in ${PROMPT_LANGUAGE_NAME[lang]} about what meaningfully changed. Ignore minor ` +
+    `technical noise (whitespace, incidental numbers like view counters or dates). If you can't see a meaningful ` +
+    `difference, reply with exactly: "${NO_CHANGE_TEXT[lang]}". Reply with only the summary itself, no preamble or heading.`
+  );
+}
 
 // Only called for watches that have never shown a price/stock (a plain
 // "watch this page" case) — commerce pages already get a precise price/
 // stock/status diff from code, no AI needed there. Returns null (falls back
-// to the plain "Вміст сторінки змінився" line) when no key is configured or
-// the call fails for any reason — this is a nice-to-have, never a blocker.
-export async function summarizeChange(env: Env, prevText: string, nextText: string): Promise<string | null> {
+// to the plain "content changed" line) when no key is configured or the call
+// fails for any reason — this is a nice-to-have, never a blocker.
+export async function summarizeChange(env: Env, prevText: string, nextText: string, lang: Lang): Promise<string | null> {
   if (!env.ANTHROPIC_API_KEY) return null;
 
   try {
@@ -18,11 +37,11 @@ export async function summarizeChange(env: Env, prevText: string, nextText: stri
       model: "claude-opus-5",
       max_tokens: 300,
       output_config: { effort: "low" },
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(lang),
       messages: [
         {
           role: "user",
-          content: `СТАРИЙ ТЕКСТ:\n${prevText}\n\nНОВИЙ ТЕКСТ:\n${nextText}`,
+          content: `OLD TEXT:\n${prevText}\n\nNEW TEXT:\n${nextText}`,
         },
       ],
     });

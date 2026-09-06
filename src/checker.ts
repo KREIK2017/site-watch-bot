@@ -1,3 +1,4 @@
+import { STOCK_DISCONTINUED, STOCK_IN, STOCK_OUT, STOCK_PREORDER } from "./i18n";
 import type { AnalyzeResult, Env } from "./types";
 
 const OUT_OF_STOCK_PATTERNS = [
@@ -68,20 +69,22 @@ export function extractPrice(text: string): string | null {
   return null;
 }
 
+// Returns a language-agnostic internal code (STOCK_IN/STOCK_OUT), not display
+// text — localizeStock() in i18n.ts renders it in the chat's language.
 export function extractStock(text: string): string | null {
   const lower = text.toLowerCase();
-  if (OUT_OF_STOCK_PATTERNS.some((p) => lower.includes(p))) return "Немає в наявності";
-  if (IN_STOCK_PATTERNS.some((p) => lower.includes(p))) return "В наявності";
+  if (OUT_OF_STOCK_PATTERNS.some((p) => lower.includes(p))) return STOCK_OUT;
+  if (IN_STOCK_PATTERNS.some((p) => lower.includes(p))) return STOCK_IN;
   return null;
 }
 
 const AVAILABILITY_MAP: Record<string, string> = {
-  instock: "В наявності",
-  limitedavailability: "Обмежена кількість",
-  outofstock: "Немає в наявності",
-  soldout: "Немає в наявності",
-  discontinued: "Знято з продажу",
-  preorder: "Передзамовлення",
+  instock: STOCK_IN,
+  limitedavailability: "limited",
+  outofstock: STOCK_OUT,
+  soldout: STOCK_OUT,
+  discontinued: STOCK_DISCONTINUED,
+  preorder: STOCK_PREORDER,
 };
 
 function mapAvailability(raw: string): string | null {
@@ -225,18 +228,6 @@ export async function sha256(text: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// HTTP status codes mean nothing to a non-technical user, so every place that
-// shows a status shows this instead of the raw number.
-export function humanizeStatus(status: number | null): string {
-  if (status === null) return "🔴 Недоступний";
-  if (status >= 200 && status < 300) return "🟢 Онлайн";
-  if (status >= 300 && status < 400) return "🟡 Перенаправлення";
-  if (status === 404) return "🔴 Сторінку не знайдено (404)";
-  if (status === 403) return "🔴 Доступ заборонено (403)";
-  if (status >= 400 && status < 500) return `🔴 Помилка сторінки (${status})`;
-  if (status >= 500) return `🔴 Сервер лежить (${status})`;
-  return `Статус ${status}`;
-}
 
 // "<css-selector> @attr-name" reads one attribute instead of the element's text.
 // Needed for sites that fill in the real price via JS and only ship the raw

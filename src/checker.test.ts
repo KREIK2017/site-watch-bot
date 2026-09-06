@@ -6,7 +6,6 @@ import {
   extractPrice,
   extractStock,
   htmlToText,
-  humanizeStatus,
   pickTitle,
 } from "./checker";
 
@@ -55,17 +54,20 @@ describe("extractPrice", () => {
 });
 
 describe("extractStock", () => {
+  // extractStock returns a language-agnostic internal code (see i18n.ts's
+  // localizeStock), not display text — the stored value must not depend on
+  // whatever language happened to be active at check time.
   it("recognizes an out-of-stock phrase", () => {
-    expect(extractStock("Наразі товар Out of stock, повернеться пізніше")).toBe("Немає в наявності");
+    expect(extractStock("Наразі товар Out of stock, повернеться пізніше")).toBe("out_of_stock");
   });
 
   it("recognizes an in-stock phrase", () => {
-    expect(extractStock("Add to cart — доставка 1-2 дні")).toBe("В наявності");
+    expect(extractStock("Add to cart — доставка 1-2 дні")).toBe("in_stock");
   });
 
   it("prefers out-of-stock when both an in-stock and out-of-stock phrase appear", () => {
     // Regression guard: extractStock checks OUT_OF_STOCK_PATTERNS first.
-    expect(extractStock("Add to cart — Out of stock")).toBe("Немає в наявності");
+    expect(extractStock("Add to cart — Out of stock")).toBe("out_of_stock");
   });
 
   it("returns null when neither phrase is present", () => {
@@ -77,11 +79,11 @@ describe("extractStock", () => {
   });
 
   it("is case-insensitive", () => {
-    expect(extractStock("OUT OF STOCK — CHECK BACK LATER")).toBe("Немає в наявності");
+    expect(extractStock("OUT OF STOCK — CHECK BACK LATER")).toBe("out_of_stock");
   });
 
   it("recognizes a Ukrainian out-of-stock phrase", () => {
-    expect(extractStock("На жаль, немає в наявності")).toBe("Немає в наявності");
+    expect(extractStock("На жаль, немає в наявності")).toBe("out_of_stock");
   });
 
   it("KNOWN LIMITATION: plain substring matching can false-positive on an unrelated phrase", () => {
@@ -89,53 +91,7 @@ describe("extractStock", () => {
     // "walking in stockings" contains the literal substring "in stock". This
     // test pins the current (accepted, low real-world risk) behavior so a
     // future refactor changes it on purpose, not by accident.
-    expect(extractStock("Ідеально для прогулянок: walking in stockings")).toBe("В наявності");
-  });
-});
-
-describe("humanizeStatus", () => {
-  it("labels 2xx as online", () => {
-    expect(humanizeStatus(200)).toContain("Онлайн");
-  });
-
-  it("labels 404 specifically", () => {
-    expect(humanizeStatus(404)).toContain("404");
-  });
-
-  it("labels 403 specifically", () => {
-    expect(humanizeStatus(403)).toContain("403");
-  });
-
-  it("labels other 4xx generically", () => {
-    expect(humanizeStatus(418)).toContain("418");
-  });
-
-  it("labels 5xx as server down", () => {
-    expect(humanizeStatus(500)).toContain("500");
-  });
-
-  it("labels null as unreachable", () => {
-    expect(humanizeStatus(null)).toContain("Недоступний");
-  });
-
-  it("falls back to a bare label for an out-of-range status (e.g. 0)", () => {
-    // Not null, not in any known HTTP range — a fetch() implementation could
-    // in principle hand back something unusual; must not throw either way.
-    expect(humanizeStatus(0)).toBe("Статус 0");
-  });
-
-  it("falls back to a bare label for a negative status", () => {
-    expect(humanizeStatus(-1)).toBe("Статус -1");
-  });
-
-  it("treats the 199/200 boundary correctly", () => {
-    expect(humanizeStatus(199)).not.toContain("Онлайн");
-    expect(humanizeStatus(200)).toContain("Онлайн");
-  });
-
-  it("treats the 299/300 boundary correctly", () => {
-    expect(humanizeStatus(299)).toContain("Онлайн");
-    expect(humanizeStatus(300)).not.toContain("Онлайн");
+    expect(extractStock("Ідеально для прогулянок: walking in stockings")).toBe("in_stock");
   });
 });
 

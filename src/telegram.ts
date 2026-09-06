@@ -28,18 +28,21 @@ export async function sendMessage(
 
 // A persistent reply keyboard (unlike inline buttons) stays docked under the
 // text field across every future message until explicitly replaced, so this
-// only needs to be sent once (on /start) to act as the bot's main menu.
-export async function sendMainMenu(token: string, chatId: number, text: string): Promise<void> {
+// only needs to be (re-)sent on /start or a language change to act as the
+// bot's main menu.
+export async function sendMainMenu(
+  token: string,
+  chatId: number,
+  text: string,
+  labels: { mySites: string; addSite: string; help: string }
+): Promise<void> {
   await callTelegram(token, "sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true,
     reply_markup: {
-      keyboard: [
-        [{ text: "📋 Мої сайти" }, { text: "➕ Додати сайт" }],
-        [{ text: "❓ Допомога" }],
-      ],
+      keyboard: [[{ text: labels.mySites }, { text: labels.addSite }], [{ text: labels.help }]],
       resize_keyboard: true,
       is_persistent: true,
     },
