@@ -486,7 +486,6 @@ async function loadRenderedPage(env: Env, url: string): Promise<LoadedPage | nul
       bestAttempt: true,
       cacheTTL: 60,
       rejectResourceTypes: ["image", "media", "font"],
-      setExtraHTTPHeaders: { "accept-language": "uk-UA,uk;q=0.9,en;q=0.7" },
     });
     if (!response.ok) {
       console.warn("Browser Run failed", response.status, await response.text().catch(() => ""));
