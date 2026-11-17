@@ -7,6 +7,7 @@ import { escapeHtml, sendMessage, watchLink } from "./telegram";
 import type { AnalyzeResult, Env, WatchRow } from "./types";
 
 const CONCURRENCY = 8;
+const ERROR_ALERT_THRESHOLD = 3;
 
 function isGoodStatus(status: number | null): boolean {
   return status !== null && status >= 200 && status < 300;
@@ -87,8 +88,10 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   const result = await analyzeUrl(env, watch.url, watch.selector);
 
   if (result.error) {
-    // Only alert on the transition into an error state, not on every failed retry.
-    if (watch.last_status !== null) {
+    const failureCount = (watch.consecutive_failures ?? 0) + 1;
+    // Access providers and remote sites fail transiently. Keep all known-good
+    // state untouched and alert once, only after three consecutive failures.
+    if (failureCount === ERROR_ALERT_THRESHOLD) {
       await sendMessage(
         env.BOT_TOKEN,
         watch.chat_id,
@@ -99,9 +102,13 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       );
     }
     await env.DB.prepare(
-      "UPDATE watches SET last_status = NULL, last_checked_at = datetime('now') WHERE id = ?"
+      `UPDATE watches SET
+         consecutive_failures = ?,
+         last_error = ?,
+         last_checked_at = datetime('now')
+       WHERE id = ?`
     )
-      .bind(watch.id)
+      .bind(failureCount, result.error, watch.id)
       .run();
     return;
   }
@@ -167,6 +174,8 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
        last_platform = COALESCE(?, last_platform),
        last_hosting = COALESCE(?, last_hosting),
        last_security_headers = COALESCE(?, last_security_headers),
+       consecutive_failures = 0,
+       last_error = NULL,
        last_checked_at = datetime('now')
      WHERE id = ?`
   )

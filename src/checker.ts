@@ -1,4 +1,4 @@
-import { STOCK_DISCONTINUED, STOCK_IN, STOCK_OUT, STOCK_PREORDER } from "./i18n";
+import { STOCK_DISCONTINUED, STOCK_IN, STOCK_LIMITED, STOCK_OUT, STOCK_PREORDER } from "./i18n";
 import type { AnalyzeResult, Env } from "./types";
 
 const OUT_OF_STOCK_PATTERNS = [
@@ -22,6 +22,8 @@ const IN_STOCK_PATTERNS = [
   "додати в кошик",
   "в наличии",
 ];
+
+const LIMITED_STOCK_PATTERNS = ["low stock", "закінчується", "осталось мало"];
 
 // One dollar/euro/pound/hryvnia sign (or 3-letter code) glued to a number, in
 // either order. Keep this code list in sync with currency.ts's KNOWN_CODES —
@@ -74,6 +76,7 @@ export function extractPrice(text: string): string | null {
 export function extractStock(text: string): string | null {
   const lower = text.toLowerCase();
   if (OUT_OF_STOCK_PATTERNS.some((p) => lower.includes(p))) return STOCK_OUT;
+  if (LIMITED_STOCK_PATTERNS.some((p) => lower.includes(p))) return STOCK_LIMITED;
   if (IN_STOCK_PATTERNS.some((p) => lower.includes(p))) return STOCK_IN;
   return null;
 }
@@ -351,12 +354,267 @@ export async function findPriceCandidates(response: Response): Promise<PriceCand
 export const BOT_USER_AGENT = "Mozilla/5.0 (compatible; SiteWatchBot/1.0)";
 
 const FETCH_TIMEOUT_MS = 15000;
+const BROWSER_TIMEOUT_MS = 25000;
+
+interface LoadedPage {
+  status: number;
+  headers: Headers;
+  html: string;
+  responseMs: number;
+  source: "direct" | "browser" | "vps" | "reader";
+}
+
+interface BrowserContentResult {
+  success: true;
+  result: string;
+  meta: {
+    status: number;
+    title: string;
+    headers?: Record<string, string>;
+    finalUrl?: string;
+  };
+}
+
+interface ReaderResult {
+  data?: {
+    title?: string;
+    content?: string;
+  };
+}
+
+interface ScraperServiceResult {
+  ok?: boolean;
+  status?: number;
+  headers?: Record<string, string>;
+  html?: string;
+  responseMs?: number;
+  blocked?: boolean;
+  blockReason?: string | null;
+  error?: string;
+}
+
+const READER_FALLBACK_HOSTS = new Set(["rozetka.com.ua", "www.rozetka.com.ua"]);
+
+function escapeAsHtmlText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function supportsReaderFallback(url: string): boolean {
+  try {
+    return READER_FALLBACK_HOSTS.has(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+export function extractRozetkaData(text: string): { price: string | null; stock: string | null } {
+  // Product pages put the old and current prices between the product heading/
+  // code and the first Buy button. The current price is the last price in that
+  // block; later prices belong to delivery, instalments and extra services.
+  const codeIndex = text.search(/Код\s*:\s*\d+/i);
+  const start = codeIndex >= 0 ? codeIndex : 0;
+  const buyOffset = text.slice(start).search(/Купити/i);
+  const end = buyOffset >= 0 ? start + buyOffset : Math.min(text.length, start + 3000);
+  const productBlock = text.slice(start, end);
+  const stockBlock = text.slice(Math.max(0, start - 1000), end);
+  const priceRe = new RegExp(PRICE_RE.source, "gi");
+  const prices = [...productBlock.matchAll(priceRe)].map((match) => match[0].replace(/\s+/g, " ").trim());
+  return {
+    price: prices.length ? prices[prices.length - 1] : null,
+    stock: extractStock(stockBlock),
+  };
+}
+
+// Challenge pages can return HTTP 200, so status alone is insufficient.
+export function detectChallenge(status: number, headers: Headers, html: string): string | null {
+  if (headers.get("cf-mitigated")?.toLowerCase() === "challenge") return "Cloudflare challenge";
+
+  const sample = html.slice(0, 120_000).toLowerCase();
+  if (
+    sample.includes("/cdn-cgi/challenge-platform/") ||
+    sample.includes("cf_chl_opt") ||
+    /<title[^>]*>\s*(just a moment|attention required|access denied)/i.test(sample) ||
+    sample.includes("checking your browser before accessing") ||
+    sample.includes("verify you are human") ||
+    sample.includes("please enable js and disable any ad blocker")
+  ) {
+    return "anti-bot challenge";
+  }
+
+  if (status === 429) return "rate limited";
+  if (status === 403) return "access forbidden";
+  if (status === 503 && sample.includes("captcha")) return "CAPTCHA challenge";
+  return null;
+}
+
+function looksLikeJavaScriptShell(html: string, text: string): boolean {
+  if (text.length >= 160) return false;
+  return (
+    /<div[^>]+id=["'](?:root|app|__next)["'][^>]*>\s*<\/div>/i.test(html) ||
+    /\b(?:__NEXT_DATA__|webpackJsonp|window\.__NUXT__)\b/i.test(html)
+  );
+}
+
+async function loadDirectPage(url: string): Promise<LoadedPage> {
+  const startedAt = Date.now();
+  const response = await fetchWithTimeout(url, {
+    redirect: "follow",
+    headers: {
+      "user-agent": BOT_USER_AGENT,
+      accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+      "accept-language": "uk-UA,uk;q=0.9,en;q=0.7",
+    },
+  });
+  return {
+    status: response.status,
+    headers: response.headers,
+    html: await response.text(),
+    responseMs: Date.now() - startedAt,
+    source: "direct",
+  };
+}
+
+async function loadRenderedPage(env: Env, url: string): Promise<LoadedPage | null> {
+  if (!env.BROWSER) return null;
+  const startedAt = Date.now();
+  try {
+    const response = await env.BROWSER.quickAction("content", {
+      url,
+      gotoOptions: { waitUntil: "networkidle2", timeout: BROWSER_TIMEOUT_MS },
+      actionTimeout: BROWSER_TIMEOUT_MS,
+      waitForTimeout: 1000,
+      bestAttempt: true,
+      cacheTTL: 60,
+      rejectResourceTypes: ["image", "media", "font"],
+      setExtraHTTPHeaders: { "accept-language": "uk-UA,uk;q=0.9,en;q=0.7" },
+    });
+    if (!response.ok) {
+      console.warn("Browser Run failed", response.status, await response.text().catch(() => ""));
+      return null;
+    }
+    const payload = (await response.json()) as BrowserContentResult;
+    if (!payload.success || typeof payload.result !== "string") return null;
+    return {
+      status: payload.meta.status,
+      headers: new Headers(payload.meta.headers ?? {}),
+      html: payload.result,
+      responseMs: Date.now() - startedAt,
+      source: "browser",
+    };
+  } catch (err) {
+    console.warn("Browser Run fallback failed", err);
+    return null;
+  }
+}
+
+async function loadVpsPage(env: Env, url: string, selector?: string | null): Promise<LoadedPage | null> {
+  const baseUrl = env.SCRAPER_SERVICE_URL?.trim();
+  const token = env.SCRAPER_SERVICE_TOKEN?.trim();
+  if (!baseUrl || !token) return null;
+
+  const startedAt = Date.now();
+  try {
+    const endpoint = new URL("/fetch", baseUrl);
+    if (endpoint.protocol !== "https:" && endpoint.hostname !== "localhost" && endpoint.hostname !== "127.0.0.1") {
+      console.warn("Refusing non-HTTPS scraper service URL");
+      return null;
+    }
+    const response = await fetchWithTimeout(
+      endpoint.toString(),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify({ url, selector: selector ?? undefined }),
+      },
+      45000
+    );
+    if (!response.ok) {
+      console.warn("VPS scraper failed", response.status, await response.text().catch(() => ""));
+      return null;
+    }
+    const payload = (await response.json()) as ScraperServiceResult;
+    if (
+      !payload.ok ||
+      payload.blocked ||
+      typeof payload.status !== "number" ||
+      typeof payload.html !== "string"
+    ) {
+      console.warn("VPS scraper did not return a usable page", payload.blockReason ?? payload.error ?? "unknown error");
+      return null;
+    }
+    return {
+      status: payload.status,
+      headers: new Headers(payload.headers ?? {}),
+      html: payload.html,
+      responseMs: payload.responseMs ?? Date.now() - startedAt,
+      source: "vps",
+    };
+  } catch (err) {
+    console.warn("VPS scraper fallback failed", err);
+    return null;
+  }
+}
+
+async function loadReaderPage(env: Env, url: string): Promise<LoadedPage | null> {
+  if (!supportsReaderFallback(url)) return null;
+  const startedAt = Date.now();
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "x-retain-images": "none",
+    "x-token-budget": "8000",
+    "x-timeout": "20",
+    "x-no-cache": "true",
+  };
+  if (env.JINA_API_KEY) headers.authorization = `Bearer ${env.JINA_API_KEY}`;
+
+  try {
+    const response = await fetchWithTimeout(`https://r.jina.ai/${url}`, { headers }, 30000);
+    if (!response.ok) {
+      console.warn("Reader fallback failed", response.status, await response.text().catch(() => ""));
+      return null;
+    }
+    const payload = (await response.json()) as ReaderResult;
+    const title = payload.data?.title?.trim();
+    const content = payload.data?.content?.trim();
+    if (!content) return null;
+    const readerProbe = `<title>${title ?? ""}</title>${content}`;
+    if (detectChallenge(200, new Headers(), readerProbe)) {
+      console.warn("Reader returned a challenge page", title ?? "(no title)");
+      return null;
+    }
+    if (supportsReaderFallback(url) && !/Код\s*:\s*\d+/i.test(content)) {
+      console.warn("Reader response did not contain a Rozetka product code", title ?? "(no title)");
+      return null;
+    }
+    // Wrap the extracted text in inert HTML so the existing parsing pipeline
+    // can hash and inspect it without treating Markdown fragments as markup.
+    const html = `<html><head><title>${escapeAsHtmlText(title ?? "")}</title></head><body><pre>${escapeAsHtmlText(content)}</pre></body></html>`;
+    return {
+      status: 200,
+      headers: new Headers({ "content-type": "text/html", "x-site-watch-source": "reader" }),
+      html,
+      responseMs: Date.now() - startedAt,
+      source: "reader",
+    };
+  } catch (err) {
+    console.warn("Reader fallback failed", err);
+    return null;
+  }
+}
 
 // A hung/very slow site would otherwise tie up its whole cron batch until
 // Cloudflare's own subrequest ceiling kicks in — bound it explicitly instead.
-export async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = FETCH_TIMEOUT_MS
+): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -483,22 +741,121 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
   }
 
   try {
-    const fetchStart = Date.now();
-    const res = await fetchWithTimeout(url, {
-      redirect: "follow",
-      headers: { "user-agent": BOT_USER_AGENT },
-    });
-    const responseMs = Date.now() - fetchStart;
-    const status = res.status;
-    // A non-2xx response body is almost always an error/bot-challenge page
-    // ("Just a moment...", "Access denied"...), never the real page title.
-    const ok = status >= 200 && status < 300;
+    let page = await loadDirectPage(url);
+    let challenge = detectChallenge(page.status, page.headers, page.html);
+    const directText = htmlToText(page.html);
+    const directOk = page.status >= 200 && page.status < 300 && !challenge;
+
+    let directSelectorText = "";
+    if (selector && directOk) {
+      const directResponse = new Response(page.html, { status: page.status, headers: page.headers });
+      directSelectorText = selector.startsWith("auto:")
+        ? await extractByAutoSpec(directResponse, selector)
+        : await extractBySelector(directResponse, selector);
+    }
+
+    // Chromium is a fallback, not the default: it costs browser time and is
+    // only useful when HTTP alone cannot produce the real page.
+    const shouldRender =
+      Boolean(challenge) ||
+      page.status === 503 ||
+      (directOk && looksLikeJavaScriptShell(page.html, directText)) ||
+      Boolean(directOk && selector && !directSelectorText);
+    let needsVps = shouldRender;
+    if (shouldRender) {
+      const rendered = await loadRenderedPage(env, url);
+      if (rendered) {
+        const renderedChallenge = detectChallenge(rendered.status, rendered.headers, rendered.html);
+        if (!renderedChallenge && rendered.status >= 200 && rendered.status < 300) {
+          page = rendered;
+          challenge = null;
+          needsVps = false;
+        } else {
+          challenge = renderedChallenge ?? `browser HTTP ${rendered.status}`;
+        }
+      }
+    }
+
+    // The VPS runs a normal Chromium process, keeps a per-site session and has
+    // a different network origin than Cloudflare. It remains a fallback: easy
+    // pages should not consume VPS browser resources.
+    if (challenge || needsVps) {
+      const vpsPage = await loadVpsPage(env, url, selector);
+      if (vpsPage) {
+        const vpsChallenge = detectChallenge(vpsPage.status, vpsPage.headers, vpsPage.html);
+        if (!vpsChallenge && vpsPage.status >= 200 && vpsPage.status < 300) {
+          page = vpsPage;
+          challenge = null;
+        } else {
+          challenge = vpsChallenge ?? `VPS browser HTTP ${vpsPage.status}`;
+        }
+      }
+    }
+
+    // Rozetka has one final domain-scoped text fallback. No other watched URL
+    // is sent to Reader.
+    if (challenge) {
+      const readerPage = await loadReaderPage(env, url);
+      if (readerPage) {
+        page = readerPage;
+        challenge = null;
+      }
+    }
+
+    const { status, responseMs, html } = page;
+    const ok = status >= 200 && status < 300 && !challenge;
+
+    if (challenge) {
+      return {
+        // Access-layer failures are not the site's real uptime status. The
+        // monitor tracks and debounces this error separately while preserving
+        // the last known-good status, price, stock and title.
+        status: null,
+        sslOk: true,
+        title: null,
+        textHash: null,
+        value: null,
+        content: null,
+        price: null,
+        priceTrusted: false,
+        stock: null,
+        responseMs,
+        pageSizeBytes: null,
+        platform: null,
+        hosting: detectHosting(page.headers),
+        securityHeaders: detectSecurityHeaders(page.headers),
+        error: `Сайт показав захист від автоматизованих запитів (${challenge})`,
+      };
+    }
 
     if (selector) {
-      const title = ok ? extractTitle(await res.clone().text().catch(() => "")) : null;
-      const text = selector.startsWith("auto:")
-        ? await extractByAutoSpec(res, selector)
-        : await extractBySelector(res, selector);
+      // Never extract values from an error page just because it happens to
+      // contain a matching class name.
+      if (!ok) {
+        return {
+          status,
+          sslOk: true,
+          title: null,
+          textHash: null,
+          value: null,
+          content: null,
+          price: null,
+          priceTrusted: false,
+          stock: null,
+          responseMs,
+          pageSizeBytes: null,
+          platform: null,
+          hosting: detectHosting(page.headers),
+          securityHeaders: detectSecurityHeaders(page.headers),
+        };
+      }
+      const title = extractTitle(html);
+      const selectorResponse = new Response(html, { status, headers: page.headers });
+      const text = page.source === "direct" && directSelectorText
+        ? directSelectorText
+        : selector.startsWith("auto:")
+          ? await extractByAutoSpec(selectorResponse, selector)
+          : await extractBySelector(selectorResponse, selector);
       if (!text) {
         return {
           status,
@@ -540,9 +897,9 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       };
     }
 
-    const html = await res.text();
     const text = htmlToText(html);
     const structured = ok ? extractStructuredData(html) : { title: null, price: null, stock: null };
+    const rozetka = ok && page.source === "reader" ? extractRozetkaData(text) : null;
     const title = ok ? pickTitle(structured.title, extractTitleTag(html)) : null;
     return {
       status,
@@ -558,9 +915,9 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       // that never show a price/stock — see the isCommercePage gate in
       // monitor.ts). Capped well short of a prompt-worrying size.
       content: ok ? truncate(text, 4000) : null,
-      price: ok ? structured.price ?? extractPrice(text) : null,
-      priceTrusted: Boolean(structured.price),
-      stock: ok ? structured.stock ?? extractStock(text) : null,
+      price: ok ? structured.price ?? rozetka?.price ?? extractPrice(text) : null,
+      priceTrusted: Boolean(structured.price || rozetka?.price),
+      stock: ok ? structured.stock ?? rozetka?.stock ?? extractStock(text) : null,
       // "Site info" — technical facts about the site itself rather than any
       // product on it, shown for every watch regardless of whether it's a
       // shop or a plain page (this is exactly what a portfolio/blog watch
@@ -568,8 +925,8 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       responseMs,
       pageSizeBytes: ok ? new TextEncoder().encode(html).length : null,
       platform: ok ? detectPlatform(html) : null,
-      hosting: detectHosting(res.headers),
-      securityHeaders: detectSecurityHeaders(res.headers),
+      hosting: detectHosting(page.headers),
+      securityHeaders: detectSecurityHeaders(page.headers),
     };
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);

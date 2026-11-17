@@ -12,6 +12,9 @@
     "secrets:bot-token": "wrangler secret put BOT_TOKEN",
     "secrets:webhook-secret": "wrangler secret put WEBHOOK_SECRET",
     "secrets:anthropic-key": "wrangler secret put ANTHROPIC_API_KEY",
+    "secrets:jina-key": "wrangler secret put JINA_API_KEY",
+    "secrets:scraper-url": "wrangler secret put SCRAPER_SERVICE_URL",
+    "secrets:scraper-token": "wrangler secret put SCRAPER_SERVICE_TOKEN",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

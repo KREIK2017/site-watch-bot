@@ -462,6 +462,22 @@ async function runCheck(
   if (!watch) return null;
 
   const result = await analyzeUrl(env, watch.url, watch.selector);
+  if (result.error) {
+    await env.DB.prepare(
+      `UPDATE watches SET
+         last_error = ?,
+         last_checked_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(result.error, id)
+      .run();
+    const lines = [`<b>${watchLink(watch.url, watch.label ?? result.title)}</b>`];
+    const selectorLine = describeSelector(watch.selector, lang);
+    if (selectorLine) lines.push(selectorLine);
+    lines.push(`⚠️ ${escapeHtml(result.error)}`);
+    return { text: lines.join("\n"), watch };
+  }
+
   // A blocked/challenged check returns nulls for hash/price/stock; COALESCE
   // keeps the last known-good values instead of wiping them out.
   await env.DB.prepare(
@@ -479,6 +495,8 @@ async function runCheck(
        last_platform = COALESCE(?, last_platform),
        last_hosting = COALESCE(?, last_hosting),
        last_security_headers = COALESCE(?, last_security_headers),
+       consecutive_failures = 0,
+       last_error = NULL,
        last_checked_at = datetime('now')
      WHERE id = ?`
   )

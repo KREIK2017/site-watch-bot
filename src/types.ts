@@ -2,6 +2,16 @@ export interface Env {
   DB: D1Database;
   BOT_TOKEN: string;
   WEBHOOK_SECRET: string;
+  // Headless Chromium fallback for JavaScript-rendered or challenged pages.
+  // Optional so tests and deployments without the binding fail gracefully.
+  BROWSER?: BrowserRun;
+  // Optional higher-rate authentication for the Rozetka Reader fallback.
+  // The public Reader endpoint also works without a key at a lower rate.
+  JINA_API_KEY?: string;
+  // Optional Playwright service running on the VPS. It is only used after the
+  // direct request / Browser Run path was blocked or could not render a page.
+  SCRAPER_SERVICE_URL?: string;
+  SCRAPER_SERVICE_TOKEN?: string;
   // Optional: powers the AI change-summary feature. Without it, watches just
   // fall back to the plain "Вміст сторінки змінився" line.
   ANTHROPIC_API_KEY?: string;
@@ -44,6 +54,8 @@ export interface WatchRow {
   selector: string | null;
   last_status: number | null;
   pending_status: number | null;
+  consecutive_failures: number;
+  last_error: string | null;
   last_hash: string | null;
   last_price: string | null;
   price_trusted: number;
