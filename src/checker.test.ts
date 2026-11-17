@@ -80,6 +80,19 @@ describe("extractStructuredData seller", () => {
     const html = '<a href="https://allegro.pl/uzytkownik/Oasis_trade/oceny">Sprzedawca</a>';
     expect(extractStructuredData(html).seller).toBe("Oasis_trade");
   });
+
+  it("reads an escaped Allegro seller-profile URL from application JSON", () => {
+    const html = String.raw`{"sellerUrl":"https:\/\/business.allegro.pl\/uzytkownik\/Oasis_trade"}`;
+    expect(extractStructuredData(html).seller).toBe("Oasis_trade");
+  });
+
+  it("reads Allegro's sellerLogin application field", () => {
+    expect(extractStructuredData('{"sellerLogin":"Oasis_trade"}').seller).toBe("Oasis_trade");
+  });
+
+  it("falls back to the rendered Polish seller label", () => {
+    expect(extractStructuredData("<div>Sprzedaje firma Oasis_trade</div>").seller).toBe("Oasis_trade");
+  });
 });
 
 describe("extractStock", () => {

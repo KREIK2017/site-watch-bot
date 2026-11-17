@@ -133,9 +133,13 @@ function entityName(value: unknown): string | null {
 }
 
 function extractAllegroSellerFromMarkup(html: string): string | null {
+  // Application JSON often escapes slashes (\/uzytkownik\/) or emits them as
+  // unicode (\u002F). Normalize before looking for the public profile URL.
+  const normalized = html.replace(/\\u002[fF]/g, "/").replace(/\\\//g, "/");
+
   // Allegro seller profiles use a stable public URL even though CSS classes
   // are generated and change frequently. Prefer that URL over visual classes.
-  const profile = html.match(/href=["'][^"']*\/uzytkownik\/([^"'/?#<]+)[^"']*["']/i);
+  const profile = normalized.match(/\/uzytkownik\/([^"'/?#<\\\s]+)/i);
   if (profile) {
     try {
       return decodeURIComponent(decodeEntities(profile[1])).trim() || null;
@@ -144,9 +148,18 @@ function extractAllegroSellerFromMarkup(html: string): string | null {
     }
   }
 
+  const sellerLogin = normalized.match(/"sellerLogin"\s*:\s*"([^"\\]+)"/i);
+  if (sellerLogin) return decodeEntities(sellerLogin[1]).trim() || null;
+
   // Some rendered variants keep the selected offer only in application JSON.
-  const embedded = html.match(/"seller"\s*:\s*\{[\s\S]{0,1200}?"(?:login|name)"\s*:\s*"([^"\\]+)"/i);
-  return embedded ? decodeEntities(embedded[1]).trim() || null : null;
+  const embedded = normalized.match(/"seller"\s*:\s*\{[\s\S]{0,1200}?"(?:login|name)"\s*:\s*"([^"\\]+)"/i);
+  if (embedded) return decodeEntities(embedded[1]).trim() || null;
+
+  // Last fallback for the rendered Polish UI. Keep the accepted login shape
+  // narrow so ordinary prose after the label cannot become a seller name.
+  const text = htmlToText(normalized);
+  const visible = text.match(/(?:Sprzedaje(?:\s+firma)?|Sprzedawca|Seller)\s*:?\s*([\p{L}\d][\p{L}\d_.-]{1,63})/iu);
+  return visible ? visible[1].trim() : null;
 }
 
 // Most modern storefronts (Shopify, WooCommerce, PrestaShop, Wix...) embed the
@@ -942,6 +955,14 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
     const structured = ok ? extractStructuredData(html) : { title: null, price: null, stock: null, seller: null };
     const rozetka = ok && page.source === "reader" ? extractRozetkaData(text) : null;
     const title = ok ? pickTitle(structured.title, extractTitleTag(html)) : null;
+    if (ok && /(^|\.)allegro\.pl$/i.test(new URL(url).hostname) && !structured.seller) {
+      console.warn("Allegro seller not found", {
+        source: page.source,
+        hasUserProfile: /uzytkownik/i.test(html),
+        hasSellerLogin: /sellerLogin/i.test(html),
+        hasSellerLabel: /sprzedaw|seller/i.test(text),
+      });
+    }
     return {
       status,
       sslOk: true,
