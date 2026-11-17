@@ -47,6 +47,14 @@ async function buildChanges(
       })
     );
   }
+  if (prev.last_seller && next.seller && prev.last_seller !== next.seller) {
+    changes.push(
+      t(lang, "changeSeller", {
+        from: escapeHtml(prev.last_seller),
+        to: escapeHtml(next.seller),
+      })
+    );
+  }
   // For a selector watch with no price/stock shape (a manga chapter number, a
   // forum reply count, a score...), show the actual old → new value instead
   // of falling back to a vague "content changed".
@@ -135,7 +143,8 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   const isBaseline = watch.last_hash === null;
   const priceChanged = Boolean(result.price) && result.price !== watch.last_price;
   const stockChanged = Boolean(result.stock) && result.stock !== watch.last_stock;
-  if (isBaseline || priceChanged || stockChanged) {
+  const sellerChanged = Boolean(result.seller) && result.seller !== watch.last_seller;
+  if (isBaseline || priceChanged || stockChanged || sellerChanged) {
     await recordHistory(
       env,
       watch.id,
@@ -167,6 +176,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
        last_price = COALESCE(?, last_price),
        price_trusted = CASE WHEN ? IS NOT NULL THEN ? ELSE price_trusted END,
        last_stock = COALESCE(?, last_stock),
+       last_seller = COALESCE(?, last_seller),
        last_value = COALESCE(?, last_value),
        last_content = COALESCE(?, last_content),
        last_response_ms = COALESCE(?, last_response_ms),
@@ -188,6 +198,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       result.price,
       result.priceTrusted ? 1 : 0,
       result.stock,
+      result.seller,
       result.value,
       result.content,
       result.responseMs,

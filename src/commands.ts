@@ -191,8 +191,8 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
 
   const baseline = await analyzeUrl(env, url, selector);
   const inserted = await env.DB.prepare(
-    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_value, last_content, last_response_ms, last_page_size, last_platform, last_hosting, last_security_headers, last_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
+    `INSERT INTO watches (chat_id, url, label, selector, last_status, last_hash, last_price, price_trusted, last_stock, last_seller, last_value, last_content, last_response_ms, last_page_size, last_platform, last_hosting, last_security_headers, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`
   )
     .bind(
       chatId,
@@ -204,6 +204,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
       baseline.price,
       baseline.priceTrusted ? 1 : 0,
       baseline.stock,
+      baseline.seller,
       baseline.value,
       baseline.content,
       baseline.responseMs,
@@ -232,6 +233,7 @@ async function handleWatch(env: Env, chatId: number, arg: string): Promise<void>
     }
     const stockDisplay = localizeStock(baseline.stock, lang);
     if (stockDisplay) lines.push(t(lang, "stockLabel", { stock: escapeHtml(stockDisplay) }));
+    if (baseline.seller) lines.push(t(lang, "sellerLabel", { seller: escapeHtml(baseline.seller) }));
     if (!baseline.price && !baseline.stock && baseline.value) {
       lines.push(t(lang, "valueLabel", { value: escapeHtml(baseline.value) }));
     }
@@ -334,6 +336,7 @@ async function buildDetailView(
   if (priceDisplay) lines.push(t(lang, "priceLabel", { price: escapeHtml(priceDisplay) }));
   const stockDisplay = localizeStock(watch.last_stock, lang);
   if (stockDisplay) lines.push(t(lang, "stockLabel", { stock: escapeHtml(stockDisplay) }));
+  if (watch.last_seller) lines.push(t(lang, "sellerLabel", { seller: escapeHtml(watch.last_seller) }));
   if (!watch.last_price && !watch.last_stock && watch.last_value) {
     lines.push(t(lang, "valueLabel", { value: escapeHtml(watch.last_value) }));
   }
@@ -488,6 +491,7 @@ async function runCheck(
        last_price = COALESCE(?, last_price),
        price_trusted = CASE WHEN ? IS NOT NULL THEN ? ELSE price_trusted END,
        last_stock = COALESCE(?, last_stock),
+       last_seller = COALESCE(?, last_seller),
        last_value = COALESCE(?, last_value),
        last_content = COALESCE(?, last_content),
        last_response_ms = COALESCE(?, last_response_ms),
@@ -508,6 +512,7 @@ async function runCheck(
       result.price,
       result.priceTrusted ? 1 : 0,
       result.stock,
+      result.seller,
       result.value,
       result.content,
       result.responseMs,
@@ -540,6 +545,7 @@ async function runCheck(
     }
     const stockDisplay = localizeStock(result.stock, lang);
     if (stockDisplay) lines.push(t(lang, "stockLabel", { stock: escapeHtml(stockDisplay) }));
+    if (result.seller) lines.push(t(lang, "sellerLabel", { seller: escapeHtml(result.seller) }));
     if (!result.price && !result.stock && result.value) {
       lines.push(t(lang, "valueLabel", { value: escapeHtml(result.value) }));
     }

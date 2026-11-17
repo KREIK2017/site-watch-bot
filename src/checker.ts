@@ -122,12 +122,44 @@ function findProductNode(node: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function entityName(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!value || typeof value !== "object") return null;
+  const entity = value as Record<string, unknown>;
+  for (const key of ["name", "alternateName", "legalName", "login"]) {
+    if (typeof entity[key] === "string" && entity[key].trim()) return entity[key].trim();
+  }
+  return null;
+}
+
+function extractAllegroSellerFromMarkup(html: string): string | null {
+  // Allegro seller profiles use a stable public URL even though CSS classes
+  // are generated and change frequently. Prefer that URL over visual classes.
+  const profile = html.match(/href=["'][^"']*\/uzytkownik\/([^"'/?#<]+)[^"']*["']/i);
+  if (profile) {
+    try {
+      return decodeURIComponent(decodeEntities(profile[1])).trim() || null;
+    } catch {
+      return decodeEntities(profile[1]).trim() || null;
+    }
+  }
+
+  // Some rendered variants keep the selected offer only in application JSON.
+  const embedded = html.match(/"seller"\s*:\s*\{[\s\S]{0,1200}?"(?:login|name)"\s*:\s*"([^"\\]+)"/i);
+  return embedded ? decodeEntities(embedded[1]).trim() || null : null;
+}
+
 // Most modern storefronts (Shopify, WooCommerce, PrestaShop, Wix...) embed the
 // name/price/availability as static Schema.org JSON-LD or Open Graph meta tags
 // — meant for Google, but it means this often exists in the raw HTML even on
 // sites where the *visible* price is drawn in later by JavaScript. Checking
 // this first lets most /watch calls skip the CSS-selector step entirely.
-function extractStructuredData(html: string): { title: string | null; price: string | null; stock: string | null } {
+export function extractStructuredData(html: string): {
+  title: string | null;
+  price: string | null;
+  stock: string | null;
+  seller: string | null;
+} {
   const scripts = html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
   for (const scriptMatch of scripts) {
     try {
@@ -140,15 +172,18 @@ function extractStructuredData(html: string): { title: string | null; price: str
       const offer = Array.isArray(offersRaw) ? offersRaw[0] : offersRaw;
       let price: string | null = null;
       let stock: string | null = null;
+      let seller: string | null = null;
       if (offer && typeof offer === "object") {
         const o = offer as Record<string, unknown>;
         const rawPrice = o.price !== undefined && o.price !== null ? String(o.price).trim() : null;
         const currency = typeof o.priceCurrency === "string" ? o.priceCurrency : null;
         price = rawPrice ? withCurrency(rawPrice, currency) : null;
         stock = typeof o.availability === "string" ? mapAvailability(o.availability) : null;
+        seller = entityName(o.seller) ?? entityName(o.offeredBy);
       }
+      seller ??= entityName(product.seller) ?? extractAllegroSellerFromMarkup(html);
 
-      if (title || price || stock) return { title, price, stock };
+      if (title || price || stock || seller) return { title, price, stock, seller };
     } catch {
       // Malformed JSON-LD is common in the wild; just skip that block.
     }
@@ -163,6 +198,7 @@ function extractStructuredData(html: string): { title: string | null; price: str
     title: ogTitle ? decodeEntities(ogTitle[1]).trim() : null,
     price: metaPrice ? withCurrency(metaPrice[1].trim(), metaCurrency?.[1] ?? null) : null,
     stock: null,
+    seller: extractAllegroSellerFromMarkup(html),
   };
 }
 
@@ -701,6 +737,7 @@ async function analyzeSteam(env: Env, appId: string): Promise<AnalyzeResult | nu
       price,
       priceTrusted: true,
       stock,
+      seller: null,
       responseMs: null,
       pageSizeBytes: null,
       platform: null,
@@ -730,6 +767,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       price: null,
       priceTrusted: false,
       stock: null,
+      seller: null,
       responseMs: null,
       pageSizeBytes: null,
       platform: null,
@@ -818,6 +856,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
         price: null,
         priceTrusted: false,
         stock: null,
+        seller: null,
         responseMs,
         pageSizeBytes: null,
         platform: null,
@@ -841,6 +880,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
           price: null,
           priceTrusted: false,
           stock: null,
+          seller: null,
           responseMs,
           pageSizeBytes: null,
           platform: null,
@@ -866,6 +906,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
           price: null,
           priceTrusted: false,
           stock: null,
+          seller: null,
           responseMs,
           pageSizeBytes: null,
           platform: null,
@@ -888,6 +929,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
         price: extractPrice(text),
         priceTrusted: true,
         stock: extractStock(text),
+        seller: null,
         responseMs,
         pageSizeBytes: null,
         platform: null,
@@ -897,7 +939,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
     }
 
     const text = htmlToText(html);
-    const structured = ok ? extractStructuredData(html) : { title: null, price: null, stock: null };
+    const structured = ok ? extractStructuredData(html) : { title: null, price: null, stock: null, seller: null };
     const rozetka = ok && page.source === "reader" ? extractRozetkaData(text) : null;
     const title = ok ? pickTitle(structured.title, extractTitleTag(html)) : null;
     return {
@@ -917,6 +959,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       price: ok ? structured.price ?? rozetka?.price ?? extractPrice(text) : null,
       priceTrusted: Boolean(structured.price || rozetka?.price),
       stock: ok ? structured.stock ?? rozetka?.stock ?? extractStock(text) : null,
+      seller: ok ? structured.seller : null,
       // "Site info" — technical facts about the site itself rather than any
       // product on it, shown for every watch regardless of whether it's a
       // shop or a plain page (this is exactly what a portfolio/blog watch
@@ -955,6 +998,7 @@ export async function analyzeUrl(env: Env, url: string, selector?: string | null
       hosting: null,
       securityHeaders: null,
       stock: null,
+      seller: null,
       error: message,
     };
   }

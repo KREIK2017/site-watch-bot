@@ -60,6 +60,7 @@ export interface WatchRow {
   last_price: string | null;
   price_trusted: number;
   last_stock: string | null;
+  last_seller: string | null;
   last_value: string | null;
   last_content: string | null;
   last_response_ms: number | null;
@@ -85,6 +86,7 @@ export interface AnalyzeResult {
   price: string | null;
   priceTrusted: boolean;
   stock: string | null;
+  seller: string | null;
   // Facts about the site itself, not any product on it — shown for every
   // watch. Only populated on a successful (2xx) no-selector fetch; null
   // everywhere else (selector watches still get responseMs).

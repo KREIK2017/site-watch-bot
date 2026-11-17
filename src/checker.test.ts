@@ -7,6 +7,7 @@ import {
   detectSecurityHeaders,
   extractPrice,
   extractRozetkaData,
+  extractStructuredData,
   extractStock,
   htmlToText,
   pickTitle,
@@ -56,6 +57,28 @@ describe("extractPrice", () => {
 
   it("returns the first match when multiple prices appear in the text", () => {
     expect(extractPrice("було 100€, стало 80€")).toBe("100€");
+  });
+});
+
+describe("extractStructuredData seller", () => {
+  it("extracts the seller from a Schema.org Offer", () => {
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      "@type": "Product",
+      name: "Example product",
+      offers: {
+        "@type": "Offer",
+        price: "26.99",
+        priceCurrency: "PLN",
+        seller: { "@type": "Organization", name: "Oasis_trade" },
+      },
+    })}</script>`;
+
+    expect(extractStructuredData(html).seller).toBe("Oasis_trade");
+  });
+
+  it("falls back to Allegro's stable seller-profile URL", () => {
+    const html = '<a href="https://allegro.pl/uzytkownik/Oasis_trade/oceny">Sprzedawca</a>';
+    expect(extractStructuredData(html).seller).toBe("Oasis_trade");
   });
 });
 
