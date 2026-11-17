@@ -12,7 +12,15 @@ import {
   t,
   type Lang,
 } from "./i18n";
-import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, setBotCommands, watchLink } from "./telegram";
+import {
+  answerCallbackQuery,
+  editMessageText,
+  escapeHtml,
+  sendMessage,
+  setBotCommands,
+  setChatCommandsMenu,
+  watchLink,
+} from "./telegram";
 import { deriveMonitorState, isProductWatch, stateFromWatch, type MonitorState } from "./monitoring-state";
 import type { Env, InlineKeyboardButton, TelegramCallbackQuery, TelegramMessage, WatchRow } from "./types";
 
@@ -905,6 +913,7 @@ export async function handleMessage(env: Env, message: TelegramMessage): Promise
         { command: "settings", description: t(lang, "menuSettings").replace(/^\S+\s/, "") },
         { command: "help", description: t(lang, "menuHelp").replace(/^\S+\s/, "") },
       ]);
+      await setChatCommandsMenu(env.BOT_TOKEN, chatId);
       await showOverview(env, chatId);
       if (!storedLangRaw?.language) {
         await sendMessage(env.BOT_TOKEN, chatId, t(lang, "askLanguage"), languageKeyboard());

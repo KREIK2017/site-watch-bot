@@ -90,6 +90,13 @@ export async function setBotCommands(
   await callTelegram(token, "setMyCommands", { commands });
 }
 
+export async function setChatCommandsMenu(token: string, chatId: number): Promise<void> {
+  await callTelegram(token, "setChatMenuButton", {
+    chat_id: chatId,
+    menu_button: { type: "commands" },
+  });
+}
+
 export function escapeHtml(input: string): string {
   return input
     .replace(/&/g, "&amp;")
