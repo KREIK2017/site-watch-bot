@@ -56,6 +56,11 @@ export interface WatchRow {
   pending_status: number | null;
   consecutive_failures: number;
   last_error: string | null;
+  monitor_type: string;
+  monitor_state: string;
+  last_success_at: string | null;
+  last_attempt_at: string | null;
+  last_state_notified_at: string | null;
   last_hash: string | null;
   last_price: string | null;
   price_trusted: number;

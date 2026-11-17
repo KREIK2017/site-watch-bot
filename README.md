@@ -189,10 +189,15 @@ the right one by tapping — no CSS knowledge required.
 
 | Command | What it does |
 | --- | --- |
-| `/watch <url>` | Watch a whole page |
+| `/start` · `/status` | Open the live monitoring overview |
+| `/sites` | Open the paginated watch list |
+| `/add` | Start the guided site/product flow |
+| `/alerts` | Recent monitoring events |
+| `/settings` | Language and currency settings |
+| `/watch <url>` | Legacy quick-add for a whole page |
 | `/watch <url> <css-selector>` | Watch one element only |
 | `/watch <url> <css-selector> @attr` | Read an attribute instead of the text |
-| `/list` | Your watches, each with a control card |
+| `/list` | Legacy alias for `/sites` |
 | `/check <id>` | Check right now |
 | `/history <id>` | Log of recorded price/stock changes (last 15) |
 | `/rename <id> <name>` | Rename a watch |

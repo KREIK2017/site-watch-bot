@@ -3,11 +3,56 @@ import { analyzeUrl } from "./checker";
 import { convertPrice, getChatCurrency } from "./currency";
 import { recordHistory } from "./history";
 import { getChatLang, humanizeStatus, localizeStock, t, type Lang } from "./i18n";
+import { deriveMonitorState, isSuccessfulState, stateFromWatch, type MonitorState } from "./monitoring-state";
 import { escapeHtml, sendMessage, watchLink } from "./telegram";
 import type { AnalyzeResult, Env, WatchRow } from "./types";
 
 const CONCURRENCY = 8;
 const ERROR_ALERT_THRESHOLD = 3;
+const BLOCKED_REMINDER_HOURS = 24;
+
+function reminderDue(lastNotifiedAt: string | null, hours: number): boolean {
+  if (!lastNotifiedAt) return true;
+  const normalized = lastNotifiedAt.includes("T") ? lastNotifiedAt : `${lastNotifiedAt.replace(" ", "T")}Z`;
+  const timestamp = new Date(normalized).getTime();
+  return Number.isNaN(timestamp) || Date.now() - timestamp >= hours * 60 * 60 * 1000;
+}
+
+async function recordStateEvent(
+  env: Env,
+  watch: WatchRow,
+  fromState: MonitorState,
+  toState: MonitorState,
+  details?: string
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO monitor_events (watch_id, chat_id, event_type, from_state, to_state, details)
+     VALUES (?, ?, 'STATE_CHANGED', ?, ?, ?)`
+  )
+    .bind(watch.id, watch.chat_id, fromState, toState, details ?? null)
+    .run();
+}
+
+async function notifyStateTransition(
+  env: Env,
+  watch: WatchRow,
+  lang: Lang,
+  fromState: MonitorState,
+  toState: MonitorState
+): Promise<void> {
+  let key: "eventBlocked" | "eventRecovered" | "eventOffline" | "eventUnknown" | null = null;
+  if (toState === "BLOCKED") key = "eventBlocked";
+  else if (toState === "OFFLINE") key = "eventOffline";
+  else if (toState === "UNKNOWN") key = "eventUnknown";
+  else if (isSuccessfulState(toState) && !isSuccessfulState(fromState)) key = "eventRecovered";
+  if (!key) return;
+  await sendMessage(
+    env.BOT_TOKEN,
+    watch.chat_id,
+    t(lang, key, { link: watchLink(watch.url, watch.label) }),
+    [[{ text: t(lang, "btnCheck"), callback_data: `chk:${watch.id}` }]]
+  );
+}
 
 function isGoodStatus(status: number | null): boolean {
   return status !== null && status >= 200 && status < 300;
@@ -94,29 +139,28 @@ async function buildChanges(
 async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   const lang = await getChatLang(env, watch.chat_id);
   const result = await analyzeUrl(env, watch.url, watch.selector);
+  const previousState = stateFromWatch(watch);
 
   if (result.error) {
     const failureCount = (watch.consecutive_failures ?? 0) + 1;
-    // Access providers and remote sites fail transiently. Keep all known-good
-    // state untouched and alert once, only after three consecutive failures.
-    if (failureCount === ERROR_ALERT_THRESHOLD) {
-      await sendMessage(
-        env.BOT_TOKEN,
-        watch.chat_id,
-        t(lang, "checkErrorAlert", {
-          link: watchLink(watch.url, watch.label),
-          error: escapeHtml(result.error),
-        })
-      );
-    }
+    const nextState = deriveMonitorState(result);
+    const stateChanged = nextState !== previousState;
+    const reminder = nextState === "BLOCKED" && reminderDue(watch.last_state_notified_at, BLOCKED_REMINDER_HOURS);
+    const shouldNotify =
+      nextState === "BLOCKED" ? stateChanged || reminder : failureCount === ERROR_ALERT_THRESHOLD;
+    if (shouldNotify) await notifyStateTransition(env, watch, lang, previousState, nextState);
+    if (stateChanged) await recordStateEvent(env, watch, previousState, nextState, result.error);
     await env.DB.prepare(
       `UPDATE watches SET
          consecutive_failures = ?,
          last_error = ?,
-         last_checked_at = datetime('now')
+         monitor_state = ?,
+         last_checked_at = datetime('now'),
+         last_attempt_at = datetime('now'),
+         last_state_notified_at = CASE WHEN ? = 1 THEN datetime('now') ELSE last_state_notified_at END
        WHERE id = ?`
     )
-      .bind(failureCount, result.error, watch.id)
+      .bind(failureCount, result.error, nextState, shouldNotify ? 1 : 0, watch.id)
       .run();
     return;
   }
@@ -155,6 +199,7 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
   }
 
   const currency = await getChatCurrency(env, watch.chat_id);
+  const nextState = deriveMonitorState({ ...result, status: effectiveStatus });
   const changes = await buildChanges(env, lang, currency, watch, { ...result, status: effectiveStatus });
   // A brand-new watch (no baseline yet) just gets its baseline stored, no alert.
   if (changes.length > 0 && watch.last_hash !== null) {
@@ -162,6 +207,17 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       "\n"
     );
     await sendMessage(env.BOT_TOKEN, watch.chat_id, text);
+    await env.DB.prepare(
+      `INSERT INTO monitor_events (watch_id, chat_id, event_type, from_state, to_state, details)
+       VALUES (?, ?, 'CONTENT_CHANGED', ?, ?, ?)`
+    )
+      .bind(watch.id, watch.chat_id, previousState, nextState, changes.join("\n"))
+      .run();
+  }
+
+  if (nextState !== previousState) {
+    await notifyStateTransition(env, watch, lang, previousState, nextState);
+    await recordStateEvent(env, watch, previousState, nextState);
   }
 
   // A blocked/challenged check returns nulls for hash/price/stock; COALESCE
@@ -184,6 +240,10 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
        last_platform = COALESCE(?, last_platform),
        last_hosting = COALESCE(?, last_hosting),
        last_security_headers = COALESCE(?, last_security_headers),
+       monitor_state = ?,
+       last_success_at = CASE WHEN ? IN ('ONLINE', 'DEGRADED') THEN datetime('now') ELSE last_success_at END,
+       last_attempt_at = datetime('now'),
+       last_state_notified_at = CASE WHEN ? <> ? THEN datetime('now') ELSE last_state_notified_at END,
        consecutive_failures = 0,
        last_error = NULL,
        last_checked_at = datetime('now')
@@ -206,6 +266,10 @@ async function checkOne(env: Env, watch: WatchRow): Promise<void> {
       result.platform,
       result.hosting,
       result.securityHeaders,
+      nextState,
+      nextState,
+      nextState,
+      previousState,
       watch.id
     )
     .run();
